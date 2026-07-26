@@ -63,7 +63,17 @@ for category in CATEGORIES:
         volume_path = f"{VOLUME_BASE_PATH}countries_export_goods/"
     
     print(f"Volume path: {volume_path}\n")
-    
+
+    # read_files() raises on a missing path and cannot infer a schema from an
+    # empty one - both normal when nothing new has been downloaded.
+    try:
+        entries = [f for f in dbutils.fs.ls(volume_path) if f.size > 0]
+    except Exception:
+        entries = []
+    if not entries:
+        print(f"⊘ No files at {volume_path}, skipping {category}")
+        continue
+
     # Get document paths to process in batches of 10
     docs_to_parse = spark.sql(f"""
         SELECT log.document_id, log.document_url, log.sub_category, files.path AS volume_path, files.content

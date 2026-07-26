@@ -420,19 +420,53 @@ SELECT * FROM fdi_other;
 -- MAGIC %md
 -- MAGIC ## 6. Province fact
 -- MAGIC
--- MAGIC Current metadata did not expose a `province_name` column on `provinces_trade_statistics`. This curated table keeps the source rows and sets province fields to null until extraction is fixed or confirmed.
+-- MAGIC Grain: **province x trade flow x month**, valued in **USD only**. These reports
+-- MAGIC carry no product breakdown and no quantities, so the product, unit and quantity
+-- MAGIC columns are null by nature rather than by omission.
+-- MAGIC
+-- MAGIC `province_name_en` is the **post-2025** unit from `dim_province`, so a province
+-- MAGIC series stays continuous across the 63 -> 34 reorganisation. `province_name_raw`
+-- MAGIC keeps whatever the source printed.
 
 -- COMMAND ----------
 
 CREATE OR REPLACE TABLE curated_trade_statistics_province
 USING DELTA AS
-SELECT *
-FROM curated_trade_statistics_total
-WHERE 1 = 0;
-
--- NOTE: This token currently lacks SELECT on `market_data.customs.provinces_trade_statistics`.
--- When permission is granted, replace this placeholder using the companion notebook
--- `02_add_province_curated_after_permission`.
+SELECT
+  'province' AS grain_type,
+  'provinces_trade_statistics' AS source_table,
+  s.document_id,
+  s.report_period,
+  s.report_month,
+  CAST(NULL AS STRING) AS report_quarter,
+  s.report_start_date,
+  s.report_end_date,
+  s.trade_flow,
+  concat('Provinces ', initcap(s.trade_flow)) AS sub_category_raw,
+  CAST(NULL AS STRING) AS product_category_raw,
+  CAST(NULL AS STRING) AS product_category_en,
+  CAST(NULL AS STRING) AS parent_category_raw,
+  CAST(NULL AS STRING) AS parent_category_en,
+  CAST(NULL AS STRING) AS country_name_raw,
+  CAST(NULL AS STRING) AS country_name_en,
+  CAST(NULL AS STRING) AS iso2,
+  CAST(NULL AS STRING) AS iso3,
+  s.province_name AS province_name_raw,
+  d.current_province_en AS province_name_en,
+  CAST(NULL AS STRING) AS vehicle_type,
+  'all_enterprises' AS ownership_scope,
+  'USD' AS unit,
+  CAST(NULL AS DECIMAL(20,3)) AS period_quantity,
+  s.period_value_usd,
+  CAST(NULL AS DECIMAL(20,3)) AS cumulative_quantity,
+  s.cumulative_value_usd,
+  FALSE AS is_reconciliation_row,
+  CAST(NULL AS STRING) AS reconciliation_basis,
+  s.parsed_timestamp AS source_timestamp,
+  current_timestamp() AS curated_at
+FROM provinces_trade_statistics s
+LEFT JOIN dim_province d
+  ON normalize_province(s.province_name) = d.province_name_normalized;
 
 -- COMMAND ----------
 
@@ -466,15 +500,16 @@ SELECT
   CAST(NULL AS STRING) AS country_name_en,
   CAST(NULL AS STRING) AS iso2,
   CAST(NULL AS STRING) AS iso3,
-  province_name AS province_name_raw,
-  province_name AS province_name_en,
+  -- These reports have no province dimension; the column was copy-paste residue.
+  CAST(NULL AS STRING) AS province_name_raw,
+  CAST(NULL AS STRING) AS province_name_en,
   vehicle_type,
   'all_enterprises' AS ownership_scope,
-  CAST(NULL AS STRING) AS unit,
+  unit,
   quantity AS period_quantity,
   value_usd AS period_value_usd,
-  CAST(NULL AS DECIMAL(20,3)) AS cumulative_quantity,
-  CAST(NULL AS DECIMAL(20,3)) AS cumulative_value_usd,
+  cumulative_quantity,
+  cumulative_value_usd,
   FALSE AS is_reconciliation_row,
   CAST(NULL AS STRING) AS reconciliation_basis,
   s.created_at AS source_timestamp,
@@ -493,21 +528,24 @@ LEFT JOIN dim_product_category p
 
 -- COMMAND ----------
 
+-- The 2018 cut must be taken from whichever period column the grain populates.
+-- Filtering on report_month alone silently dropped the whole transportation
+-- grain, which is quarterly and leaves report_month null.
 CREATE OR REPLACE VIEW curated_trade_statistics_unified AS
 SELECT * FROM curated_trade_statistics_total
-where left(report_month,4) >= '2018'
+WHERE left(coalesce(report_month, report_quarter), 4) >= '2018'
 UNION ALL
 SELECT * FROM curated_trade_statistics_country
-where left(report_month,4) >= '2018'
+WHERE left(coalesce(report_month, report_quarter), 4) >= '2018'
 UNION ALL
 SELECT * FROM curated_trade_statistics_fdi
-where left(report_month,4) >= '2018'
+WHERE left(coalesce(report_month, report_quarter), 4) >= '2018'
 UNION ALL
 SELECT * FROM curated_trade_statistics_province
-where left(report_month,4) >= '2018'
+WHERE left(coalesce(report_month, report_quarter), 4) >= '2018'
 UNION ALL
 SELECT * FROM curated_trade_statistics_transportation
-where left(report_month,4) >= '2018';
+WHERE left(coalesce(report_month, report_quarter), 4) >= '2018';
 
 -- COMMAND ----------
 
@@ -517,17 +555,22 @@ where left(report_month,4) >= '2018';
 -- COMMAND ----------
 
 CREATE OR REPLACE VIEW curated_trade_statistics_row_counts AS
-SELECT 'curated_trade_statistics_total' AS object_name, COUNT(*) AS row_count FROM curated_trade_statistics_total
-where left(report_month,4) >= '2018'
-UNION ALL SELECT 'curated_trade_statistics_country', COUNT(*) FROM curated_trade_statistics_country
-where left(report_month,4) >= '2018'
-UNION ALL SELECT 'curated_trade_statistics_fdi', COUNT(*) FROM curated_trade_statistics_fdi
-where left(report_month,4) >= '2018'
-UNION ALL SELECT 'curated_trade_statistics_province', COUNT(*) FROM curated_trade_statistics_province
-where left(report_month,4) >= '2018'
-UNION ALL SELECT 'curated_trade_statistics_transportation', COUNT(*) FROM curated_trade_statistics_transportation
-where left(report_month,4) >= '2018'
-UNION ALL SELECT 'curated_trade_statistics_unified', COUNT(*) FROM curated_trade_statistics_unified
-where left(report_month,4) >= '2018';
+SELECT 'curated_trade_statistics_total' AS object_name, COUNT(*) AS row_count,
+       COUNT(*) FILTER (WHERE left(coalesce(report_month, report_quarter), 4) >= '2018') AS row_count_2018_plus
+FROM curated_trade_statistics_total
+UNION ALL SELECT 'curated_trade_statistics_country', COUNT(*),
+       COUNT(*) FILTER (WHERE left(coalesce(report_month, report_quarter), 4) >= '2018')
+FROM curated_trade_statistics_country
+UNION ALL SELECT 'curated_trade_statistics_fdi', COUNT(*),
+       COUNT(*) FILTER (WHERE left(coalesce(report_month, report_quarter), 4) >= '2018')
+FROM curated_trade_statistics_fdi
+UNION ALL SELECT 'curated_trade_statistics_province', COUNT(*),
+       COUNT(*) FILTER (WHERE left(coalesce(report_month, report_quarter), 4) >= '2018')
+FROM curated_trade_statistics_province
+UNION ALL SELECT 'curated_trade_statistics_transportation', COUNT(*),
+       COUNT(*) FILTER (WHERE left(coalesce(report_month, report_quarter), 4) >= '2018')
+FROM curated_trade_statistics_transportation
+UNION ALL SELECT 'curated_trade_statistics_unified', COUNT(*), COUNT(*)
+FROM curated_trade_statistics_unified;
 
 SELECT * FROM curated_trade_statistics_row_counts;

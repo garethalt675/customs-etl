@@ -396,18 +396,23 @@ for row in raw_df.collect():
         report_period, report_quarter, start_date, end_date = extract_report_metadata_quarterly(text)
         print(f"  Tables found: {len(tables)}")
 
-        # Older scans often lose the quarter heading to OCR. URL discovery derived
-        # one from the API report title, which is authoritative, so prefer that over
-        # discarding the document.
-        if not report_quarter and row['url_report_quarter']:
-            report_quarter = row['url_report_quarter']
+        # The API report title is the publisher's own label for the document, so it
+        # outranks a regex over body text - which can latch onto a comparison period
+        # and silently file the whole document under the wrong quarter (observed:
+        # a Q2 report filed as Q1, and a 2024 report filed as 2023).
+        url_quarter = row['url_report_quarter']
+        if url_quarter and report_quarter and url_quarter != report_quarter:
+            print(f"  ⚠ Quarter mismatch: text says {report_quarter}, "
+                  f"report title says {url_quarter} - trusting the title")
+        if url_quarter:
+            report_quarter = url_quarter
             year_num = int(report_quarter[:4])
             quarter_num = int(report_quarter[-1])
             report_period = f"Q{quarter_num} {year_num}"
             start_month, end_month = {1: (1, 3), 2: (4, 6), 3: (7, 9), 4: (10, 12)}[quarter_num]
             start_date = date(year_num, start_month, 1)
             end_date = date(year_num, end_month, monthrange(year_num, end_month)[1])
-            print(f"  Quarter from URL table: {report_quarter}")
+            print(f"  Quarter from report title: {report_quarter}")
 
         # This workstream is quarterly. Annual PTVT reports (e.g. the 2015 full-year
         # and 2016 review files) parse fine but have no quarter, and mixing them in
