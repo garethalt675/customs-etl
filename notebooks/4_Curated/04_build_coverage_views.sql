@@ -91,6 +91,27 @@ FROM transportation_trade_statistics WHERE report_quarter IS NOT NULL GROUP BY r
 
 -- COMMAND ----------
 
+-- MAGIC %md
+-- MAGIC ## Known source gaps
+-- MAGIC
+-- MAGIC Periods Customs never made publicly retrievable. These are excluded from
+-- MAGIC `customs_coverage_gaps` so QA is not permanently red for something no amount
+-- MAGIC of re-running can fix - but they stay visible in `customs_coverage` with
+-- MAGIC status `source_unavailable`, and the reason is recorded here rather than in
+-- MAGIC someone's memory.
+-- MAGIC
+-- MAGIC Add a row only after confirming the report is genuinely unobtainable.
+
+-- COMMAND ----------
+
+CREATE OR REPLACE VIEW customs_known_source_gaps AS
+SELECT * FROM VALUES
+  ('countries', '2022-10', 'import',
+   'Customs published this report only at 10.224.128.185:8080, an internal RFC1918 host unreachable from outside their network. Export side is present. Confirmed 2026-07-26.')
+AS t(workstream, period, missing_flow, reason);
+
+-- COMMAND ----------
+
 CREATE OR REPLACE VIEW customs_coverage AS
 SELECT
   e.workstream,
@@ -99,6 +120,7 @@ SELECT
   coalesce(a.flows_present, 0) AS flows_present,
   coalesce(a.rows, 0)          AS rows,
   CASE
+    WHEN g.period IS NOT NULL   THEN 'source_unavailable'
     WHEN a.period IS NULL       THEN 'missing'
     WHEN a.flows_present < 2    THEN 'incomplete'
     ELSE 'ok'
@@ -111,13 +133,15 @@ SELECT
               END AS is_recent
 FROM customs_expected_periods e
 LEFT JOIN customs_actual_periods a
-  ON a.workstream = e.workstream AND a.period = e.period;
+  ON a.workstream = e.workstream AND a.period = e.period
+LEFT JOIN customs_known_source_gaps g
+  ON g.workstream = e.workstream AND g.period = e.period;
 
 -- COMMAND ----------
 
 CREATE OR REPLACE VIEW customs_coverage_gaps AS
 SELECT * FROM customs_coverage
-WHERE status <> 'ok' AND NOT is_recent
+WHERE status NOT IN ('ok', 'source_unavailable') AND NOT is_recent
 ORDER BY workstream, period;
 
 -- COMMAND ----------

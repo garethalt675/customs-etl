@@ -1,0 +1,103 @@
+{
+  "email_notifications": {
+    "no_alert_for_skipped_runs": false
+  },
+  "format": "MULTI_TASK",
+  "max_concurrent_runs": 1,
+  "name": "etl data customs (orchestrator)",
+  "queue": {
+    "enabled": true
+  },
+  "schedule": {
+    "pause_status": "UNPAUSED",
+    "quartz_cron_expression": "0 0 6 15 * ?",
+    "timezone_id": "Asia/Ho_Chi_Minh"
+  },
+  "tasks": [
+    {
+      "disabled": false,
+      "email_notifications": {},
+      "run_if": "ALL_SUCCESS",
+      "run_job_task": {
+        "job_id": 834607708504289
+      },
+      "task_key": "run_totals",
+      "timeout_seconds": 0,
+      "webhook_notifications": {}
+    },
+    {
+      "disabled": false,
+      "email_notifications": {},
+      "run_if": "ALL_SUCCESS",
+      "run_job_task": {
+        "job_id": 272686436789081
+      },
+      "task_key": "run_countries",
+      "timeout_seconds": 0,
+      "webhook_notifications": {}
+    },
+    {
+      "disabled": false,
+      "email_notifications": {},
+      "run_if": "ALL_SUCCESS",
+      "run_job_task": {
+        "job_id": 943749699682688
+      },
+      "task_key": "run_fdi",
+      "timeout_seconds": 0,
+      "webhook_notifications": {}
+    },
+    {
+      "disabled": false,
+      "email_notifications": {},
+      "run_if": "ALL_SUCCESS",
+      "run_job_task": {
+        "job_id": 127808821627251
+      },
+      "task_key": "run_provinces",
+      "timeout_seconds": 0,
+      "webhook_notifications": {}
+    },
+    {
+      "disabled": false,
+      "email_notifications": {},
+      "run_if": "ALL_SUCCESS",
+      "run_job_task": {
+        "job_id": 20569819731044
+      },
+      "task_key": "run_transportation",
+      "timeout_seconds": 0,
+      "webhook_notifications": {}
+    },
+    {
+      "depends_on": [
+        {
+          "task_key": "run_provinces"
+        },
+        {
+          "task_key": "run_fdi"
+        },
+        {
+          "task_key": "run_totals"
+        },
+        {
+          "task_key": "run_countries"
+        },
+        {
+          "task_key": "run_transportation"
+        }
+      ],
+      "disabled": false,
+      "email_notifications": {},
+      "run_if": "ALL_DONE",
+      "run_job_task": {
+        "job_id": 712991216447767
+      },
+      "task_key": "run_curated",
+      "timeout_seconds": 0,
+      "webhook_notifications": {}
+    }
+  ],
+  "timeout_seconds": 0,
+  "webhook_notifications": {}
+}

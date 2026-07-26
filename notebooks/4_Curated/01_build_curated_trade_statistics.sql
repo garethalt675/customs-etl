@@ -61,20 +61,35 @@ USING (
     UNION
     SELECT product_category, parent_category FROM transportation_trade_statistics
   )
-  SELECT DISTINCT
-    product_category AS product_category_raw,
-    lower(trim(product_category)) AS product_category_normalized,
-    product_category AS product_category_en,
-    parent_category AS parent_category_raw,
-    lower(trim(parent_category)) AS parent_category_normalized,
-    parent_category AS parent_category_en,
+  -- One row per normalized key. Source labels differing only by case (e.g.
+  -- "Ổ tộ" vs "ổ tộ") collapse to the same key, and inserting both would put
+  -- duplicates in the dimension - which then fan out every fact that joins to it.
+  SELECT
+    product_category_raw,
+    product_category_normalized,
+    product_category_raw AS product_category_en,
+    parent_category_raw,
+    parent_category_normalized,
+    parent_category_raw AS parent_category_en,
     'raw_fallback_pending_review' AS mapping_method,
     CAST(NULL AS DOUBLE) AS confidence_score,
     TRUE AS needs_review,
     current_timestamp() AS created_at,
     current_timestamp() AS updated_at
-  FROM raw_values
-  WHERE product_category IS NOT NULL
+  FROM (
+    SELECT
+      product_category AS product_category_raw,
+      lower(trim(product_category)) AS product_category_normalized,
+      parent_category AS parent_category_raw,
+      lower(trim(parent_category)) AS parent_category_normalized,
+      row_number() OVER (
+        PARTITION BY lower(trim(product_category)), lower(trim(parent_category))
+        ORDER BY product_category
+      ) AS rn
+    FROM raw_values
+    WHERE product_category IS NOT NULL
+  )
+  WHERE rn = 1
 ) AS source
 ON target.product_category_normalized <=> source.product_category_normalized
 AND target.parent_category_normalized <=> source.parent_category_normalized
@@ -103,10 +118,11 @@ USING DELTA;
 
 MERGE INTO dim_country AS target
 USING (
-  SELECT DISTINCT
-    country_name AS country_name_raw,
-    lower(trim(country_name)) AS country_name_normalized,
-    country_name AS country_name_en,
+  -- One row per normalized key, for the same reason as dim_product_category.
+  SELECT
+    country_name_raw,
+    country_name_normalized,
+    country_name_raw AS country_name_en,
     CAST(NULL AS STRING) AS iso2,
     CAST(NULL AS STRING) AS iso3,
     'raw_fallback_pending_review' AS mapping_method,
@@ -114,8 +130,17 @@ USING (
     TRUE AS needs_review,
     current_timestamp() AS created_at,
     current_timestamp() AS updated_at
-  FROM countries_trade_statistics
-  WHERE country_name IS NOT NULL
+  FROM (
+    SELECT
+      country_name AS country_name_raw,
+      lower(trim(country_name)) AS country_name_normalized,
+      row_number() OVER (
+        PARTITION BY lower(trim(country_name)) ORDER BY country_name
+      ) AS rn
+    FROM countries_trade_statistics
+    WHERE country_name IS NOT NULL
+  )
+  WHERE rn = 1
 ) AS source
 ON target.country_name_normalized <=> source.country_name_normalized
 WHEN NOT MATCHED THEN INSERT *;

@@ -1,0 +1,127 @@
+{
+  "email_notifications": {
+    "no_alert_for_skipped_runs": false
+  },
+  "environments": [
+    {
+      "environment_key": "Default",
+      "spec": {
+        "environment_version": "5"
+      }
+    }
+  ],
+  "format": "MULTI_TASK",
+  "max_concurrent_runs": 1,
+  "name": "etl data customs (curated)",
+  "performance_target": "PERFORMANCE_OPTIMIZED",
+  "queue": {
+    "enabled": true
+  },
+  "tasks": [
+    {
+      "disabled": false,
+      "email_notifications": {},
+      "environment_key": "Default",
+      "notebook_task": {
+        "notebook_path": "/Workspace/Users/tuckeyhue@gmail.com/Market Research/1. Data ETL/1. Customs/4_Curated/03_build_dim_province",
+        "source": "WORKSPACE"
+      },
+      "run_if": "ALL_SUCCESS",
+      "task_key": "dim_province",
+      "timeout_seconds": 0,
+      "webhook_notifications": {}
+    },
+    {
+      "depends_on": [
+        {
+          "task_key": "dim_province"
+        }
+      ],
+      "disabled": false,
+      "email_notifications": {},
+      "environment_key": "Default",
+      "notebook_task": {
+        "notebook_path": "/Workspace/Users/tuckeyhue@gmail.com/Market Research/1. Data ETL/1. Customs/4_Curated/01_build_curated_trade_statistics",
+        "source": "WORKSPACE"
+      },
+      "run_if": "ALL_SUCCESS",
+      "task_key": "build_curated",
+      "timeout_seconds": 0,
+      "webhook_notifications": {}
+    },
+    {
+      "depends_on": [
+        {
+          "task_key": "build_curated"
+        }
+      ],
+      "disabled": false,
+      "email_notifications": {},
+      "environment_key": "Default",
+      "notebook_task": {
+        "notebook_path": "/Workspace/Users/tuckeyhue@gmail.com/Market Research/1. Data ETL/1. Customs/4_Curated/05_translate_dimensions",
+        "source": "WORKSPACE"
+      },
+      "run_if": "ALL_SUCCESS",
+      "task_key": "translate_dims",
+      "timeout_seconds": 0,
+      "webhook_notifications": {}
+    },
+    {
+      "depends_on": [
+        {
+          "task_key": "translate_dims"
+        }
+      ],
+      "disabled": false,
+      "email_notifications": {},
+      "environment_key": "Default",
+      "notebook_task": {
+        "notebook_path": "/Workspace/Users/tuckeyhue@gmail.com/Market Research/1. Data ETL/1. Customs/4_Curated/01_build_curated_trade_statistics",
+        "source": "WORKSPACE"
+      },
+      "run_if": "ALL_SUCCESS",
+      "task_key": "refresh_curated",
+      "timeout_seconds": 0,
+      "webhook_notifications": {}
+    },
+    {
+      "depends_on": [
+        {
+          "task_key": "refresh_curated"
+        }
+      ],
+      "disabled": false,
+      "email_notifications": {},
+      "environment_key": "Default",
+      "notebook_task": {
+        "notebook_path": "/Workspace/Users/tuckeyhue@gmail.com/Market Research/1. Data ETL/1. Customs/4_Curated/04_build_coverage_views",
+        "source": "WORKSPACE"
+      },
+      "run_if": "ALL_SUCCESS",
+      "task_key": "coverage_views",
+      "timeout_seconds": 0,
+      "webhook_notifications": {}
+    },
+    {
+      "depends_on": [
+        {
+          "task_key": "coverage_views"
+        }
+      ],
+      "disabled": false,
+      "email_notifications": {},
+      "environment_key": "Default",
+      "notebook_task": {
+        "notebook_path": "/Workspace/Users/tuckeyhue@gmail.com/Market Research/1. Data ETL/1. Customs/4_Curated/06_qa_checks",
+        "source": "WORKSPACE"
+      },
+      "run_if": "ALL_SUCCESS",
+      "task_key": "qa_checks",
+      "timeout_seconds": 0,
+      "webhook_notifications": {}
+    }
+  ],
+  "timeout_seconds": 0,
+  "webhook_notifications": {}
+}

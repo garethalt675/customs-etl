@@ -13,7 +13,8 @@
 -- MAGIC   by an earlier run) is left alone, so re-running is cheap and non-destructive.
 -- MAGIC - **Low confidence stays flagged.** `needs_review` is cleared only above the
 -- MAGIC   threshold; anything the model is unsure of remains visible for a human.
--- MAGIC - **Nothing is deleted.** Orphan cleanup below is opt-in and reversible.
+-- MAGIC - **Orphans are dropped first.** A label no fact row uses any more is removed
+-- MAGIC   before translating, so superseded OCR garbage is not sent to the model.
 -- MAGIC
 -- MAGIC Re-runnable and idempotent.
 
@@ -25,7 +26,74 @@ USE SCHEMA customs;
 -- COMMAND ----------
 
 -- MAGIC %md
--- MAGIC ## 1. Country names and ISO codes
+-- MAGIC ## 1. Drop orphaned dimension entries
+-- MAGIC
+-- MAGIC The dimension MERGEs only insert, so a label that once appeared in the facts
+-- MAGIC stays forever. That matters because Customs' **preliminary** files are badly
+-- MAGIC OCR'd (695 distinct product labels vs 254 in the official files, 198 countries
+-- MAGIC vs 89). Once a month is superseded by its official version, the garbled
+-- MAGIC preliminary labels are orphaned - and if left in place they get translated,
+-- MAGIC producing confident nonsense like `EX TÔ NI A` -> "Extraterritoriality".
+-- MAGIC
+-- MAGIC An entry is dropped only when **no fact row anywhere** still uses it, so a
+-- MAGIC legitimately dormant category survives.
+
+-- COMMAND ----------
+
+CREATE OR REPLACE VIEW dim_country_orphans AS
+SELECT d.country_name_raw, d.country_name_en, d.iso2, d.mapping_method
+FROM dim_country d
+WHERE NOT EXISTS (
+  SELECT 1 FROM countries_trade_statistics f
+  WHERE lower(trim(f.country_name)) = d.country_name_normalized
+);
+
+-- COMMAND ----------
+
+CREATE OR REPLACE VIEW dim_product_category_orphans AS
+SELECT d.product_category_raw, d.parent_category_raw, d.product_category_en, d.mapping_method
+FROM dim_product_category d
+WHERE NOT EXISTS (
+  SELECT 1 FROM (
+    SELECT product_category FROM trade_statistics
+    UNION SELECT product_category FROM countries_trade_statistics
+    UNION SELECT product_category FROM fdi_trade_statistics
+    UNION SELECT product_category FROM transportation_trade_statistics
+  ) f
+  WHERE lower(trim(f.product_category)) = d.product_category_normalized
+);
+
+-- COMMAND ----------
+
+DELETE FROM dim_country
+WHERE country_name_normalized IN (
+  SELECT country_name_normalized FROM dim_country d
+  WHERE NOT EXISTS (
+    SELECT 1 FROM countries_trade_statistics f
+    WHERE lower(trim(f.country_name)) = d.country_name_normalized
+  )
+);
+
+-- COMMAND ----------
+
+DELETE FROM dim_product_category
+WHERE product_category_normalized IN (
+  SELECT product_category_normalized FROM dim_product_category d
+  WHERE NOT EXISTS (
+    SELECT 1 FROM (
+      SELECT product_category FROM trade_statistics
+      UNION SELECT product_category FROM countries_trade_statistics
+      UNION SELECT product_category FROM fdi_trade_statistics
+      UNION SELECT product_category FROM transportation_trade_statistics
+    ) f
+    WHERE lower(trim(f.product_category)) = d.product_category_normalized
+  )
+);
+
+-- COMMAND ----------
+
+-- MAGIC %md
+-- MAGIC ## 2. Country names and ISO codes
 -- MAGIC
 -- MAGIC Country labels are a small, well-known vocabulary, so the model is asked for a
 -- MAGIC strict JSON object and the result is parsed rather than trusted as prose.
@@ -37,7 +105,7 @@ SELECT
   country_name_raw,
   country_name_normalized,
   ai_query(
-    'databricks-claude-sonnet-5',
+    'databricks-llama-4-maverick',
     concat(
       'You are given the Vietnamese name of a country or territory as used in ',
       'Vietnam Customs trade statistics. Return ONLY a JSON object with keys ',
@@ -54,14 +122,21 @@ WHERE needs_review = TRUE
 
 -- COMMAND ----------
 
+-- One row per key: MERGE aborts if two source rows target the same row, and the
+-- dimension can briefly hold case-variant duplicates.
 CREATE OR REPLACE TEMPORARY VIEW country_parsed AS
-SELECT
-  country_name_normalized,
-  nullif(trim(get_json_object(response, '$.en')), '')   AS country_name_en,
-  upper(nullif(trim(get_json_object(response, '$.iso2')), '')) AS iso2,
-  upper(nullif(trim(get_json_object(response, '$.iso3')), '')) AS iso3,
-  try_cast(get_json_object(response, '$.confidence') AS DOUBLE) AS confidence_score
-FROM country_translations;
+SELECT country_name_normalized, country_name_en, iso2, iso3, confidence_score
+FROM (
+  SELECT
+    country_name_normalized,
+    nullif(trim(get_json_object(response, '$.en')), '')   AS country_name_en,
+    upper(nullif(trim(get_json_object(response, '$.iso2')), '')) AS iso2,
+    upper(nullif(trim(get_json_object(response, '$.iso3')), '')) AS iso3,
+    try_cast(get_json_object(response, '$.confidence') AS DOUBLE) AS confidence_score,
+    row_number() OVER (PARTITION BY country_name_normalized ORDER BY country_name_raw) AS rn
+  FROM country_translations
+)
+WHERE rn = 1;
 
 -- COMMAND ----------
 
@@ -81,7 +156,7 @@ WHEN MATCHED AND source.country_name_en IS NOT NULL THEN UPDATE SET
 -- COMMAND ----------
 
 -- MAGIC %md
--- MAGIC ## 2. Product categories
+-- MAGIC ## 3. Product categories
 -- MAGIC
 -- MAGIC These are commodity group labels, so the prompt asks for trade terminology
 -- MAGIC rather than a literal translation.
@@ -93,7 +168,7 @@ SELECT
   product_category_normalized,
   parent_category_normalized,
   ai_query(
-    'databricks-claude-sonnet-5',
+    'databricks-llama-4-maverick',
     concat(
       'Translate this Vietnamese commodity group label from Vietnam Customs ',
       'trade statistics into concise English trade terminology. Return ONLY a ',
@@ -109,12 +184,21 @@ WHERE needs_review = TRUE
 -- COMMAND ----------
 
 CREATE OR REPLACE TEMPORARY VIEW product_parsed AS
-SELECT
-  product_category_normalized,
-  parent_category_normalized,
-  nullif(trim(get_json_object(response, '$.en')), '') AS product_category_en,
-  try_cast(get_json_object(response, '$.confidence') AS DOUBLE) AS confidence_score
-FROM product_translations;
+SELECT product_category_normalized, parent_category_normalized,
+       product_category_en, confidence_score
+FROM (
+  SELECT
+    product_category_normalized,
+    parent_category_normalized,
+    nullif(trim(get_json_object(response, '$.en')), '') AS product_category_en,
+    try_cast(get_json_object(response, '$.confidence') AS DOUBLE) AS confidence_score,
+    row_number() OVER (
+      PARTITION BY product_category_normalized, parent_category_normalized
+      ORDER BY product_category_normalized
+    ) AS rn
+  FROM product_translations
+)
+WHERE rn = 1;
 
 -- COMMAND ----------
 
@@ -132,7 +216,7 @@ WHEN MATCHED AND source.product_category_en IS NOT NULL THEN UPDATE SET
 -- COMMAND ----------
 
 -- MAGIC %md
--- MAGIC ## 3. Propagate parent labels
+-- MAGIC ## 4. Propagate parent labels
 -- MAGIC
 -- MAGIC A parent category is itself a product category elsewhere in the table, so its
 -- MAGIC English label is reused rather than translated twice.
@@ -158,26 +242,60 @@ WHEN MATCHED THEN UPDATE SET
 -- COMMAND ----------
 
 -- MAGIC %md
--- MAGIC ## 4. Orphan review
+-- MAGIC ## 5. Flag near-duplicate labels for review
 -- MAGIC
--- MAGIC `dim_country` accumulated entries from an earlier version of the country
--- MAGIC extraction that no longer appear in the facts. They are **reported, not
--- MAGIC deleted** - an orphan may simply be a country absent from recent months.
+-- MAGIC The model's own `confidence` does not detect OCR damage - it returned 1.0 while
+-- MAGIC mapping `BÁI LOAN` to Ireland and `BỒ ĐIÊN NGA` to Russia (they are Taiwan and
+-- MAGIC Portugal). A string signal catches what the model cannot: if two raw labels are
+-- MAGIC nearly identical but resolve to **different** countries, at least one is wrong.
+-- MAGIC
+-- MAGIC These are flagged, not corrected - deciding which variant is right needs a
+-- MAGIC human, and a wrong auto-fix would be worse than a flag.
 
 -- COMMAND ----------
 
-CREATE OR REPLACE VIEW dim_country_orphans AS
-SELECT d.country_name_raw, d.country_name_en, d.iso2, d.mapping_method
-FROM dim_country d
-WHERE NOT EXISTS (
-  SELECT 1 FROM countries_trade_statistics f
-  WHERE lower(trim(f.country_name)) = d.country_name_normalized
-);
+CREATE OR REPLACE VIEW dim_country_suspect_variants AS
+SELECT
+  a.country_name_raw   AS label_a,
+  a.country_name_en    AS english_a,
+  b.country_name_raw   AS label_b,
+  b.country_name_en    AS english_b,
+  levenshtein(a.country_name_normalized, b.country_name_normalized) AS edit_distance
+FROM dim_country a
+JOIN dim_country b
+  ON a.country_name_normalized < b.country_name_normalized
+ AND levenshtein(a.country_name_normalized, b.country_name_normalized) <= 2
+ AND length(a.country_name_normalized) >= 4
+WHERE coalesce(a.country_name_en, '') <> coalesce(b.country_name_en, '')
+  -- Plain-ASCII pairs are genuinely different countries, not OCR variants.
+  AND (a.country_name_raw RLIKE '[^\x00-\x7F]'
+    OR b.country_name_raw RLIKE '[^\x00-\x7F]');
+
+-- COMMAND ----------
+
+MERGE INTO dim_country AS target
+USING (
+  SELECT DISTINCT country_name_normalized FROM (
+    SELECT a.country_name_normalized
+    FROM dim_country a JOIN dim_country b
+      ON a.country_name_normalized <> b.country_name_normalized
+     AND levenshtein(a.country_name_normalized, b.country_name_normalized) <= 2
+     AND length(a.country_name_normalized) >= 4
+    WHERE coalesce(a.country_name_en, '') <> coalesce(b.country_name_en, '')
+      AND (a.country_name_raw RLIKE '[^\x00-\x7F]'
+        OR b.country_name_raw RLIKE '[^\x00-\x7F]')
+  )
+) AS source
+ON target.country_name_normalized = source.country_name_normalized
+WHEN MATCHED THEN UPDATE SET
+  target.needs_review = TRUE,
+  target.mapping_method = 'llm_ai_query_suspect_variant',
+  target.updated_at = current_timestamp();
 
 -- COMMAND ----------
 
 -- MAGIC %md
--- MAGIC ## 5. Results
+-- MAGIC ## 6. Results
 
 -- COMMAND ----------
 

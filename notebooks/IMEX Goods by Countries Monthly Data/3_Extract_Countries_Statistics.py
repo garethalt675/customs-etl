@@ -1069,7 +1069,27 @@ else:
         if USE_MERGE_UPSERT:
             print("\nUsing MERGE to prevent duplicates...")
             stats_df.createOrReplaceTempView("temp_new_statistics")
-            
+
+            # Customs republishes a month as an official (VN-CT) file after the
+            # preliminary (VN-SB) one. That is a different URL, so a different
+            # document_id, and the MERGE key below would insert it alongside the
+            # old rows - double counting the whole month. Clear the month first so
+            # whichever version we just extracted is the only one present.
+            months_to_replace = spark.sql("""
+                SELECT DISTINCT sub_category, report_month
+                FROM temp_new_statistics
+                WHERE report_month IS NOT NULL
+            """).collect()
+
+            if months_to_replace:
+                print(f"  Replacing {len(months_to_replace)} month/category slice(s)...")
+                for slice_row in months_to_replace:
+                    spark.sql(f"""
+                        DELETE FROM {TARGET_TABLE}
+                        WHERE sub_category = '{slice_row.sub_category}'
+                          AND report_month = '{slice_row.report_month}'
+                    """)
+
             merge_query = f"""
             MERGE INTO {TARGET_TABLE} AS target
             USING temp_new_statistics AS source
