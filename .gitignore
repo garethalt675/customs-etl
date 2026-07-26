@@ -1,0 +1,31 @@
+# Credentials - never commit these
+.databrickscfg
+*.pem
+*.key
+.env
+.env.*
+!.env.example
+secrets.json
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+env/
+*.egg-info/
+.pytest_cache/
+.ipynb_checkpoints/
+
+# Downloaded source PDFs and scratch data (these live in Unity Catalog volumes)
+data/
+*.pdf
+*.xlsx
+*.csv
+
+# Editor / OS
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+desktop.ini

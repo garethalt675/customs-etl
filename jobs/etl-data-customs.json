@@ -1,0 +1,91 @@
+{
+  "email_notifications": {
+    "no_alert_for_skipped_runs": false
+  },
+  "environments": [
+    {
+      "environment_key": "Default",
+      "spec": {
+        "environment_version": "5"
+      }
+    }
+  ],
+  "format": "MULTI_TASK",
+  "max_concurrent_runs": 1,
+  "name": "etl data customs",
+  "performance_target": "PERFORMANCE_OPTIMIZED",
+  "queue": {
+    "enabled": true
+  },
+  "tasks": [
+    {
+      "disabled": false,
+      "email_notifications": {},
+      "environment_key": "Default",
+      "notebook_task": {
+        "notebook_path": "/Workspace/Users/tuckeyhue@gmail.com/Market Research/1. Data ETL/1. Customs/IMEX Goods Monthly Data ETL/0_Update_URL_Table",
+        "source": "WORKSPACE"
+      },
+      "run_if": "ALL_SUCCESS",
+      "task_key": "url_crawl",
+      "timeout_seconds": 0,
+      "webhook_notifications": {}
+    },
+    {
+      "depends_on": [
+        {
+          "task_key": "url_crawl"
+        }
+      ],
+      "disabled": false,
+      "email_notifications": {},
+      "environment_key": "Default",
+      "notebook_task": {
+        "notebook_path": "/Workspace/Users/tuckeyhue@gmail.com/Market Research/1. Data ETL/1. Customs/IMEX Goods Monthly Data ETL/1_Download_Documents",
+        "source": "WORKSPACE"
+      },
+      "run_if": "ALL_SUCCESS",
+      "task_key": "download_data_customs",
+      "timeout_seconds": 0,
+      "webhook_notifications": {}
+    },
+    {
+      "depends_on": [
+        {
+          "task_key": "download_data_customs"
+        }
+      ],
+      "disabled": false,
+      "email_notifications": {},
+      "environment_key": "Default",
+      "notebook_task": {
+        "notebook_path": "/Workspace/Users/tuckeyhue@gmail.com/Market Research/1. Data ETL/1. Customs/IMEX Goods Monthly Data ETL/2_Parse_Documents",
+        "source": "WORKSPACE"
+      },
+      "run_if": "ALL_SUCCESS",
+      "task_key": "parse",
+      "timeout_seconds": 0,
+      "webhook_notifications": {}
+    },
+    {
+      "depends_on": [
+        {
+          "task_key": "parse"
+        }
+      ],
+      "disabled": false,
+      "email_notifications": {},
+      "environment_key": "Default",
+      "notebook_task": {
+        "notebook_path": "/Workspace/Users/tuckeyhue@gmail.com/Market Research/1. Data ETL/1. Customs/IMEX Goods Monthly Data ETL/3_Extract_Statistics",
+        "source": "WORKSPACE"
+      },
+      "run_if": "ALL_SUCCESS",
+      "task_key": "ETL",
+      "timeout_seconds": 0,
+      "webhook_notifications": {}
+    }
+  ],
+  "timeout_seconds": 0,
+  "webhook_notifications": {}
+}

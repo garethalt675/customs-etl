@@ -1,0 +1,94 @@
+{
+  "email_notifications": {
+    "no_alert_for_skipped_runs": false
+  },
+  "environments": [
+    {
+      "environment_key": "Default",
+      "spec": {
+        "environment_version": "5"
+      }
+    }
+  ],
+  "format": "MULTI_TASK",
+  "max_concurrent_runs": 1,
+  "name": "etl data customs (transportation)",
+  "performance_target": "PERFORMANCE_OPTIMIZED",
+  "queue": {
+    "enabled": true
+  },
+  "tasks": [
+    {
+      "disabled": false,
+      "email_notifications": {},
+      "environment_key": "Default",
+      "notebook_task": {
+        "base_parameters": {
+          "dry_run": "false"
+        },
+        "notebook_path": "/Workspace/Users/tuckeyhue@gmail.com/Market Research/1. Data ETL/1. Customs/IMEX Goods by Transportation Quarterly/0_Update_Transportation_URL_Table",
+        "source": "WORKSPACE"
+      },
+      "run_if": "ALL_SUCCESS",
+      "task_key": "url_crawl",
+      "timeout_seconds": 0,
+      "webhook_notifications": {}
+    },
+    {
+      "depends_on": [
+        {
+          "task_key": "url_crawl"
+        }
+      ],
+      "disabled": false,
+      "email_notifications": {},
+      "environment_key": "Default",
+      "notebook_task": {
+        "notebook_path": "/Workspace/Users/tuckeyhue@gmail.com/Market Research/1. Data ETL/1. Customs/IMEX Goods by Transportation Quarterly/1_Download_Transportation_Documents",
+        "source": "WORKSPACE"
+      },
+      "run_if": "ALL_SUCCESS",
+      "task_key": "download_docs",
+      "timeout_seconds": 0,
+      "webhook_notifications": {}
+    },
+    {
+      "depends_on": [
+        {
+          "task_key": "download_docs"
+        }
+      ],
+      "disabled": false,
+      "email_notifications": {},
+      "environment_key": "Default",
+      "notebook_task": {
+        "notebook_path": "/Workspace/Users/tuckeyhue@gmail.com/Market Research/1. Data ETL/1. Customs/IMEX Goods by Transportation Quarterly/2_Parse_Transportation_Documents",
+        "source": "WORKSPACE"
+      },
+      "run_if": "ALL_SUCCESS",
+      "task_key": "parsed_docs",
+      "timeout_seconds": 0,
+      "webhook_notifications": {}
+    },
+    {
+      "depends_on": [
+        {
+          "task_key": "parsed_docs"
+        }
+      ],
+      "disabled": false,
+      "email_notifications": {},
+      "environment_key": "Default",
+      "notebook_task": {
+        "notebook_path": "/Workspace/Users/tuckeyhue@gmail.com/Market Research/1. Data ETL/1. Customs/IMEX Goods by Transportation Quarterly/3_Extract_Transportation_Statistics",
+        "source": "WORKSPACE"
+      },
+      "run_if": "ALL_SUCCESS",
+      "task_key": "extract_data",
+      "timeout_seconds": 0,
+      "webhook_notifications": {}
+    }
+  ],
+  "timeout_seconds": 0,
+  "webhook_notifications": {}
+}
