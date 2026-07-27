@@ -81,24 +81,26 @@ python scripts/jobs_use_git.py             # apply (idempotent)
 Checkout of this private repo needs a GitHub credential in the workspace under
 **Settings → Linked accounts**. Without it every task fails at checkout.
 
-### Syncing with the workspace copy
+### Editing in the Databricks UI
 
-The workspace folder still holds a copy for interactive work. It is now a
-scratchpad, not the source of truth.
+There is a **Git folder** at
 
-```bash
-python scripts/databricks_sync.py diff          # what differs
-python scripts/databricks_sync.py diff -v       # ...with line diffs
-python scripts/databricks_sync.py pull          # workspace -> repo
-python scripts/databricks_sync.py push          # repo -> workspace
-python scripts/databricks_sync.py push --dry-run
+```
+/Users/tuckeyhue@gmail.com/Market Research/1. Data ETL/customs-etl
 ```
 
-Loop when prototyping in the UI: edit in the workspace, `pull`, commit, push to
-`main`. Loop on a fresh machine: clone, edit locally, commit, push, then `push`
-to Databricks if you also want the interactive copy updated.
+It is a real clone of this repo on `main`, with Pull and Commit & Push buttons in
+the Databricks UI. Edit a notebook there, commit, push — then the next scheduled
+run picks it up, because runs read `main`.
 
-Point at a different workspace folder with `CUSTOMS_WS_BASE`.
+Pull before you start. The Git folder does not update itself, and it is the one
+place where a stale checkout can quietly cost you an afternoon.
+
+The old plain folder `1. Data ETL/1. Customs` was **deleted on 2026-07-27**. It
+was a copy that no longer ran anything, which made it easy to edit the wrong
+file. `scripts/databricks_sync.py` existed to keep it in step and is now retired
+— do not point it at the Git folder, it writes through the workspace API and
+would fight the checkout.
 
 ### Job definitions
 

@@ -1,5 +1,15 @@
 #!/usr/bin/env python
-"""Sync notebooks between this repo and the Databricks workspace.
+"""Sync notebooks between this repo and a plain Databricks workspace folder.
+
+RETIRED as of 2026-07-27 and kept only for reuse elsewhere. The plain workspace
+copy it synced (`.../1. Data ETL/1. Customs`) has been deleted, so the default
+CUSTOMS_WS_BASE below points at nothing.
+
+Databricks now holds a real Git folder at
+`/Users/tuckeyhue@gmail.com/Market Research/1. Data ETL/customs-etl`, which
+pulls and pushes to GitHub natively — use its Pull / Commit & Push buttons, not
+this script. Never point this script at the Git folder: it writes through the
+workspace API and would fight the checkout.
 
     python scripts/databricks_sync.py pull    # workspace -> repo
     python scripts/databricks_sync.py push    # repo -> workspace
@@ -9,8 +19,7 @@ Auth comes from the `DEFAULT` profile in ~/.databrickscfg, or from the
 DATABRICKS_HOST / DATABRICKS_TOKEN environment variables. Nothing here reads or
 writes credentials.
 
-Set CUSTOMS_WS_BASE to point at a different workspace folder (e.g. a personal
-copy on another account).
+Set CUSTOMS_WS_BASE to point at a plain (non-Git) workspace folder.
 """
 import argparse
 import base64
