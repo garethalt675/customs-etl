@@ -1,0 +1,4462 @@
+{
+  "datasets": [
+    {
+      "name": "ds_kpi",
+      "displayName": "Kpi",
+      "queryLines": [
+        "-- Headline counters: rolling 12 months ending at the latest published month,\n",
+        "-- with the preceding 12 months as the year-on-year comparison.\n",
+        "WITH monthly AS (\n",
+        "  SELECT report_month, trade_flow, sum(period_value_usd) AS v\n",
+        "  FROM market_data.customs.curated_trade_statistics_unified\n",
+        "  WHERE grain_type = 'total' AND report_month IS NOT NULL\n",
+        "  GROUP BY report_month, trade_flow\n",
+        "),\n",
+        "bounds AS (\n",
+        "  SELECT to_date(max(report_month) || '-01') AS mx FROM monthly\n",
+        "),\n",
+        "f AS (\n",
+        "  SELECT to_date(m.report_month || '-01') AS d, m.trade_flow, m.v, b.mx\n",
+        "  FROM monthly m CROSS JOIN bounds b\n",
+        "),\n",
+        "agg AS (\n",
+        "  SELECT\n",
+        "    mx,\n",
+        "    sum(CASE WHEN trade_flow = 'export' AND d >  add_months(mx, -12) THEN v END) AS exp_now,\n",
+        "    sum(CASE WHEN trade_flow = 'import' AND d >  add_months(mx, -12) THEN v END) AS imp_now,\n",
+        "    sum(CASE WHEN trade_flow = 'export' AND d >  add_months(mx, -24)\n",
+        "                                        AND d <= add_months(mx, -12) THEN v END) AS exp_prev,\n",
+        "    sum(CASE WHEN trade_flow = 'import' AND d >  add_months(mx, -24)\n",
+        "                                        AND d <= add_months(mx, -12) THEN v END) AS imp_prev\n",
+        "  FROM f GROUP BY mx\n",
+        ")\n",
+        "SELECT\n",
+        "  date_format(mx, 'MMM yyyy')                            AS latest_month,\n",
+        "  round(exp_now / 1e9, 1)                                AS exports_bn,\n",
+        "  round(imp_now / 1e9, 1)                                AS imports_bn,\n",
+        "  round((exp_now - imp_now) / 1e9, 1)                    AS balance_bn,\n",
+        "  round((exp_now + imp_now) / 1e9, 1)                    AS turnover_bn,\n",
+        "  round((exp_now / nullif(exp_prev, 0) - 1) * 100, 1)    AS exports_yoy_pct,\n",
+        "  round((imp_now / nullif(imp_prev, 0) - 1) * 100, 1)    AS imports_yoy_pct\n",
+        "FROM agg\n"
+      ]
+    },
+    {
+      "name": "ds_national_monthly",
+      "displayName": "National Monthly",
+      "queryLines": [
+        "-- One row per month per flow, national totals.\n",
+        "SELECT\n",
+        "  to_date(report_month || '-01')                    AS report_date,\n",
+        "  report_month,\n",
+        "  year(to_date(report_month || '-01'))              AS report_year,\n",
+        "  initcap(trade_flow)                               AS flow,\n",
+        "  round(sum(period_value_usd) / 1e9, 3)             AS value_bn\n",
+        "FROM market_data.customs.curated_trade_statistics_unified\n",
+        "WHERE grain_type = 'total' AND report_month IS NOT NULL\n",
+        "GROUP BY 1, 2, 3, 4\n"
+      ]
+    },
+    {
+      "name": "ds_national_balance",
+      "displayName": "National Balance",
+      "queryLines": [
+        "-- Exports, imports and the surplus/deficit side by side, one row per month.\n",
+        "SELECT\n",
+        "  to_date(report_month || '-01')       AS report_date,\n",
+        "  report_month,\n",
+        "  year(to_date(report_month || '-01')) AS report_year,\n",
+        "  round(sum(CASE WHEN trade_flow = 'export' THEN period_value_usd ELSE 0 END) / 1e9, 3) AS exports_bn,\n",
+        "  round(sum(CASE WHEN trade_flow = 'import' THEN period_value_usd ELSE 0 END) / 1e9, 3) AS imports_bn,\n",
+        "  round(sum(CASE WHEN trade_flow = 'export' THEN period_value_usd\n",
+        "                 ELSE -period_value_usd END) / 1e9, 3)                                  AS balance_bn\n",
+        "FROM market_data.customs.curated_trade_statistics_unified\n",
+        "WHERE grain_type = 'total' AND report_month IS NOT NULL\n",
+        "GROUP BY 1, 2, 3\n"
+      ]
+    },
+    {
+      "name": "ds_annual",
+      "displayName": "Annual",
+      "queryLines": [
+        "-- Calendar-year totals. The newest year is partial - flagged so the chart can say so.\n",
+        "WITH y AS (\n",
+        "  SELECT\n",
+        "    year(to_date(report_month || '-01')) AS report_year,\n",
+        "    initcap(trade_flow)                  AS flow,\n",
+        "    count(DISTINCT report_month)         AS months_present,\n",
+        "    sum(period_value_usd)                AS v\n",
+        "  FROM market_data.customs.curated_trade_statistics_unified\n",
+        "  WHERE grain_type = 'total' AND report_month IS NOT NULL\n",
+        "  GROUP BY 1, 2\n",
+        ")\n",
+        "SELECT\n",
+        "  report_year,\n",
+        "  flow,\n",
+        "  round(v / 1e9, 1)                                     AS value_bn,\n",
+        "  months_present,\n",
+        "  CASE WHEN months_present < 12 THEN 'Partial year' ELSE 'Full year' END AS year_status\n",
+        "FROM y\n"
+      ]
+    },
+    {
+      "name": "ds_products",
+      "displayName": "Products",
+      "queryLines": [
+        "-- Product x month x flow, national totals, with a stable overall rank per flow\n",
+        "-- so widgets can take a readable top-N without re-ranking on every filter.\n",
+        "WITH base AS (\n",
+        "  SELECT\n",
+        "    to_date(report_month || '-01') AS report_date,\n",
+        "    report_month,\n",
+        "    initcap(trade_flow)            AS flow,\n",
+        "    product_category_en            AS category,\n",
+        "    period_value_usd               AS v\n",
+        "  FROM market_data.customs.curated_trade_statistics_unified\n",
+        "  WHERE grain_type = 'total'\n",
+        "    AND report_month IS NOT NULL\n",
+        "    AND product_category_en IS NOT NULL\n",
+        "),\n",
+        "ranked AS (\n",
+        "  SELECT flow, category,\n",
+        "         row_number() OVER (PARTITION BY flow ORDER BY sum(v) DESC) AS rank_overall\n",
+        "  FROM base GROUP BY flow, category\n",
+        ")\n",
+        "SELECT\n",
+        "  b.report_date,\n",
+        "  b.report_month,\n",
+        "  year(b.report_date)               AS report_year,\n",
+        "  b.flow,\n",
+        "  b.category,\n",
+        "  r.rank_overall,\n",
+        "  round(sum(b.v) / 1e9, 4)          AS value_bn\n",
+        "FROM base b\n",
+        "JOIN ranked r ON r.flow = b.flow AND r.category = b.category\n",
+        "GROUP BY 1, 2, 3, 4, 5, 6\n"
+      ]
+    },
+    {
+      "name": "ds_product_summary",
+      "displayName": "Product Summary",
+      "queryLines": [
+        "-- Product league table: latest 12 months vs the 12 before, per flow.\n",
+        "WITH base AS (\n",
+        "  SELECT\n",
+        "    to_date(report_month || '-01') AS d,\n",
+        "    initcap(trade_flow)            AS flow,\n",
+        "    product_category_en            AS category,\n",
+        "    period_value_usd               AS v\n",
+        "  FROM market_data.customs.curated_trade_statistics_unified\n",
+        "  WHERE grain_type = 'total'\n",
+        "    AND report_month IS NOT NULL\n",
+        "    AND product_category_en IS NOT NULL\n",
+        "),\n",
+        "b AS (SELECT max(d) AS mx FROM base),\n",
+        "agg AS (\n",
+        "  SELECT\n",
+        "    base.flow,\n",
+        "    base.category,\n",
+        "    sum(CASE WHEN d >  add_months(mx, -12) THEN v END) AS now_v,\n",
+        "    sum(CASE WHEN d >  add_months(mx, -24)\n",
+        "              AND d <= add_months(mx, -12) THEN v END) AS prev_v\n",
+        "  FROM base CROSS JOIN b\n",
+        "  GROUP BY base.flow, base.category\n",
+        ")\n",
+        "SELECT\n",
+        "  flow,\n",
+        "  category,\n",
+        "  round(now_v / 1e9, 2)                                   AS last_12m_bn,\n",
+        "  round(prev_v / 1e9, 2)                                  AS prior_12m_bn,\n",
+        "  round((now_v / nullif(prev_v, 0) - 1) * 100, 1)         AS yoy_pct,\n",
+        "  round(now_v * 100.0 / nullif(sum(now_v) OVER (PARTITION BY flow), 0), 2) AS share_pct,\n",
+        "  row_number() OVER (PARTITION BY flow ORDER BY now_v DESC)               AS rank_overall\n",
+        "FROM agg\n",
+        "WHERE now_v IS NOT NULL\n"
+      ]
+    },
+    {
+      "name": "ds_countries",
+      "displayName": "Countries",
+      "queryLines": [
+        "-- Country x month x flow. 'Other / Unallocated' is the reconciliation row that\n",
+        "-- closes the gap to the national total; it is flagged rather than hidden.\n",
+        "WITH base AS (\n",
+        "  SELECT\n",
+        "    to_date(report_month || '-01') AS report_date,\n",
+        "    report_month,\n",
+        "    initcap(trade_flow)            AS flow,\n",
+        "    country_name_en                AS country,\n",
+        "    is_reconciliation_row          AS is_unallocated,\n",
+        "    period_value_usd               AS v\n",
+        "  FROM market_data.customs.curated_trade_statistics_unified\n",
+        "  WHERE grain_type = 'country'\n",
+        "    AND report_month IS NOT NULL\n",
+        "    AND country_name_en IS NOT NULL\n",
+        "),\n",
+        "ranked AS (\n",
+        "  SELECT flow, country,\n",
+        "         row_number() OVER (PARTITION BY flow ORDER BY sum(v) DESC) AS rank_overall\n",
+        "  FROM base WHERE NOT is_unallocated GROUP BY flow, country\n",
+        ")\n",
+        "SELECT\n",
+        "  b.report_date,\n",
+        "  b.report_month,\n",
+        "  year(b.report_date)                AS report_year,\n",
+        "  b.flow,\n",
+        "  b.country,\n",
+        "  b.is_unallocated,\n",
+        "  coalesce(r.rank_overall, 9999)     AS rank_overall,\n",
+        "  round(sum(b.v) / 1e9, 4)           AS value_bn\n",
+        "FROM base b\n",
+        "LEFT JOIN ranked r ON r.flow = b.flow AND r.country = b.country\n",
+        "GROUP BY 1, 2, 3, 4, 5, 6, 7\n"
+      ]
+    },
+    {
+      "name": "ds_country_balance",
+      "displayName": "Country Balance",
+      "queryLines": [
+        "-- Bilateral position per partner over the latest 12 months: what Vietnam sells\n",
+        "-- them, what it buys, and the surplus or deficit that leaves.\n",
+        "WITH base AS (\n",
+        "  SELECT to_date(report_month || '-01') AS d, trade_flow, country_name_en AS country,\n",
+        "         period_value_usd AS v\n",
+        "  FROM market_data.customs.curated_trade_statistics_unified\n",
+        "  WHERE grain_type = 'country'\n",
+        "    AND report_month IS NOT NULL\n",
+        "    AND country_name_en IS NOT NULL\n",
+        "    AND NOT is_reconciliation_row\n",
+        "),\n",
+        "b AS (SELECT max(d) AS mx FROM base),\n",
+        "agg AS (\n",
+        "  SELECT\n",
+        "    base.country,\n",
+        "    sum(CASE WHEN trade_flow = 'export' AND d > add_months(mx, -12) THEN v ELSE 0 END) AS e,\n",
+        "    sum(CASE WHEN trade_flow = 'import' AND d > add_months(mx, -12) THEN v ELSE 0 END) AS i\n",
+        "  FROM base CROSS JOIN b\n",
+        "  GROUP BY base.country\n",
+        ")\n",
+        "SELECT\n",
+        "  country,\n",
+        "  round(e / 1e9, 2)                                          AS exports_bn,\n",
+        "  round(i / 1e9, 2)                                          AS imports_bn,\n",
+        "  round((e - i) / 1e9, 2)                                    AS balance_bn,\n",
+        "  round((e + i) / 1e9, 2)                                    AS turnover_bn,\n",
+        "  CASE WHEN e >= i THEN 'Surplus' ELSE 'Deficit' END          AS position,\n",
+        "  row_number() OVER (ORDER BY (e + i) DESC)                   AS rank_overall\n",
+        "FROM agg\n",
+        "WHERE e + i > 0\n"
+      ]
+    },
+    {
+      "name": "ds_provinces",
+      "displayName": "Provinces",
+      "queryLines": [
+        "-- Province x month x flow. USD only - province reports carry no products and no\n",
+        "-- quantities. Names are already rolled up to the 34 post-2025 units, so the\n",
+        "-- series stays continuous across the July 2025 reorganisation.\n",
+        "WITH base AS (\n",
+        "  SELECT\n",
+        "    to_date(report_month || '-01') AS report_date,\n",
+        "    report_month,\n",
+        "    initcap(trade_flow)            AS flow,\n",
+        "    province_name_en               AS province,\n",
+        "    period_value_usd               AS v\n",
+        "  FROM market_data.customs.curated_trade_statistics_unified\n",
+        "  WHERE grain_type = 'province'\n",
+        "    AND report_month IS NOT NULL\n",
+        "    AND province_name_en IS NOT NULL\n",
+        "),\n",
+        "ranked AS (\n",
+        "  SELECT flow, province,\n",
+        "         row_number() OVER (PARTITION BY flow ORDER BY sum(v) DESC) AS rank_overall\n",
+        "  FROM base GROUP BY flow, province\n",
+        ")\n",
+        "SELECT\n",
+        "  b.report_date,\n",
+        "  b.report_month,\n",
+        "  year(b.report_date)      AS report_year,\n",
+        "  b.flow,\n",
+        "  b.province,\n",
+        "  r.rank_overall,\n",
+        "  round(sum(b.v) / 1e9, 4) AS value_bn\n",
+        "FROM base b\n",
+        "JOIN ranked r ON r.flow = b.flow AND r.province = b.province\n",
+        "GROUP BY 1, 2, 3, 4, 5, 6\n"
+      ]
+    },
+    {
+      "name": "ds_province_balance",
+      "displayName": "Province Balance",
+      "queryLines": [
+        "-- Province league table over the latest 12 months.\n",
+        "WITH base AS (\n",
+        "  SELECT to_date(report_month || '-01') AS d, trade_flow, province_name_en AS province,\n",
+        "         period_value_usd AS v\n",
+        "  FROM market_data.customs.curated_trade_statistics_unified\n",
+        "  WHERE grain_type = 'province'\n",
+        "    AND report_month IS NOT NULL\n",
+        "    AND province_name_en IS NOT NULL\n",
+        "),\n",
+        "b AS (SELECT max(d) AS mx FROM base),\n",
+        "agg AS (\n",
+        "  SELECT\n",
+        "    base.province,\n",
+        "    sum(CASE WHEN trade_flow = 'export' AND d > add_months(mx, -12) THEN v ELSE 0 END) AS e,\n",
+        "    sum(CASE WHEN trade_flow = 'import' AND d > add_months(mx, -12) THEN v ELSE 0 END) AS i\n",
+        "  FROM base CROSS JOIN b\n",
+        "  GROUP BY base.province\n",
+        ")\n",
+        "SELECT\n",
+        "  province,\n",
+        "  round(e / 1e9, 2)                                 AS exports_bn,\n",
+        "  round(i / 1e9, 2)                                 AS imports_bn,\n",
+        "  round((e - i) / 1e9, 2)                           AS balance_bn,\n",
+        "  round((e + i) / 1e9, 2)                           AS turnover_bn,\n",
+        "  round(e * 100.0 / nullif(sum(e) OVER (), 0), 2)   AS export_share_pct,\n",
+        "  row_number() OVER (ORDER BY (e + i) DESC)         AS rank_overall\n",
+        "FROM agg\n",
+        "WHERE e + i > 0\n"
+      ]
+    },
+    {
+      "name": "ds_transport",
+      "displayName": "Transport",
+      "queryLines": [
+        "-- Transport mode x product x quarter. Quarterly by nature; Customs has\n",
+        "-- published nothing for 2026, so the series ending at 2025-Q4 is expected.\n",
+        "WITH base AS (\n",
+        "  SELECT\n",
+        "    to_date(concat(\n",
+        "        substr(report_quarter, 1, 4), '-',\n",
+        "        lpad(cast((cast(substr(report_quarter, 7, 1) AS int) - 1) * 3 + 1 AS string), 2, '0'),\n",
+        "        '-01'))      AS quarter_date,\n",
+        "    report_quarter,\n",
+        "    initcap(trade_flow) AS flow,\n",
+        "    CASE vehicle_type\n",
+        "        WHEN 'Đường thủy'  THEN 'Sea / waterway'\n",
+        "        WHEN 'Đường không' THEN 'Air'\n",
+        "        WHEN 'Đường bộ'    THEN 'Road'\n",
+        "        ELSE 'Other'\n",
+        "      END         AS mode,\n",
+        "    product_category_en AS category,\n",
+        "    period_value_usd    AS v\n",
+        "  FROM market_data.customs.curated_trade_statistics_unified\n",
+        "  WHERE grain_type = 'transportation'\n",
+        "    AND report_quarter IS NOT NULL\n",
+        "    AND vehicle_type IS NOT NULL\n",
+        "),\n",
+        "ranked AS (\n",
+        "  SELECT flow, category,\n",
+        "         row_number() OVER (PARTITION BY flow ORDER BY sum(v) DESC) AS rank_overall\n",
+        "  FROM base GROUP BY flow, category\n",
+        ")\n",
+        "SELECT\n",
+        "  b.quarter_date,\n",
+        "  b.report_quarter,\n",
+        "  year(b.quarter_date)      AS report_year,\n",
+        "  b.flow,\n",
+        "  b.mode,\n",
+        "  b.category,\n",
+        "  r.rank_overall,\n",
+        "  round(sum(b.v) / 1e9, 4)  AS value_bn\n",
+        "FROM base b\n",
+        "JOIN ranked r ON r.flow = b.flow AND r.category = b.category\n",
+        "GROUP BY 1, 2, 3, 4, 5, 6, 7\n"
+      ]
+    },
+    {
+      "name": "ds_transport_share",
+      "displayName": "Transport Share",
+      "queryLines": [
+        "-- Share of each quarter's trade carried by each mode.\n",
+        "WITH base AS (\n",
+        "  SELECT\n",
+        "    to_date(concat(\n",
+        "        substr(report_quarter, 1, 4), '-',\n",
+        "        lpad(cast((cast(substr(report_quarter, 7, 1) AS int) - 1) * 3 + 1 AS string), 2, '0'),\n",
+        "        '-01'))      AS quarter_date,\n",
+        "    report_quarter,\n",
+        "    initcap(trade_flow) AS flow,\n",
+        "    CASE vehicle_type\n",
+        "        WHEN 'Đường thủy'  THEN 'Sea / waterway'\n",
+        "        WHEN 'Đường không' THEN 'Air'\n",
+        "        WHEN 'Đường bộ'    THEN 'Road'\n",
+        "        ELSE 'Other'\n",
+        "      END         AS mode,\n",
+        "    sum(period_value_usd) AS v\n",
+        "  FROM market_data.customs.curated_trade_statistics_unified\n",
+        "  WHERE grain_type = 'transportation'\n",
+        "    AND report_quarter IS NOT NULL\n",
+        "    AND vehicle_type IS NOT NULL\n",
+        "  GROUP BY 1, 2, 3, 4\n",
+        ")\n",
+        "SELECT\n",
+        "  quarter_date,\n",
+        "  report_quarter,\n",
+        "  year(quarter_date)                                                       AS report_year,\n",
+        "  flow,\n",
+        "  mode,\n",
+        "  round(v / 1e9, 3)                                                        AS value_bn,\n",
+        "  round(v * 100.0 / sum(v) OVER (PARTITION BY report_quarter, flow), 1)    AS share_pct\n",
+        "FROM base\n"
+      ]
+    },
+    {
+      "name": "ds_fdi",
+      "displayName": "Fdi",
+      "queryLines": [
+        "-- Foreign-invested vs domestic enterprises. The FDI grain's reconciliation rows\n",
+        "-- are the non-FDI residual, so FDI is the non-reconciliation part and domestic\n",
+        "-- is the national total minus it.\n",
+        "WITH tot AS (\n",
+        "  SELECT report_month, trade_flow, sum(period_value_usd) AS v\n",
+        "  FROM market_data.customs.curated_trade_statistics_unified WHERE grain_type = 'total' AND report_month IS NOT NULL\n",
+        "  GROUP BY 1, 2\n",
+        "),\n",
+        "fdi AS (\n",
+        "  SELECT report_month, trade_flow, sum(period_value_usd) AS v\n",
+        "  FROM market_data.customs.curated_trade_statistics_unified WHERE grain_type = 'fdi' AND report_month IS NOT NULL\n",
+        "    AND NOT is_reconciliation_row\n",
+        "  GROUP BY 1, 2\n",
+        ")\n",
+        "SELECT\n",
+        "  to_date(t.report_month || '-01')                            AS report_date,\n",
+        "  t.report_month,\n",
+        "  year(to_date(t.report_month || '-01'))                      AS report_year,\n",
+        "  initcap(t.trade_flow)                                       AS flow,\n",
+        "  round(f.v / 1e9, 3)                                         AS fdi_bn,\n",
+        "  round(greatest(t.v - f.v, 0) / 1e9, 3)                      AS domestic_bn,\n",
+        "  round(least(f.v / nullif(t.v, 0), 1) * 100, 1)              AS fdi_share_pct\n",
+        "FROM tot t\n",
+        "JOIN fdi f ON f.report_month = t.report_month AND f.trade_flow = t.trade_flow\n"
+      ]
+    },
+    {
+      "name": "ds_fdi_products",
+      "displayName": "Fdi Products",
+      "queryLines": [
+        "-- Where foreign-invested enterprises concentrate, latest 12 months.\n",
+        "WITH base AS (\n",
+        "  SELECT to_date(report_month || '-01') AS d, initcap(trade_flow) AS flow,\n",
+        "         product_category_en AS category, period_value_usd AS v\n",
+        "  FROM market_data.customs.curated_trade_statistics_unified\n",
+        "  WHERE grain_type = 'fdi' AND report_month IS NOT NULL\n",
+        "    AND NOT is_reconciliation_row\n",
+        "    AND product_category_en IS NOT NULL\n",
+        "),\n",
+        "b AS (SELECT max(d) AS mx FROM base),\n",
+        "agg AS (\n",
+        "  SELECT base.flow, base.category, sum(CASE WHEN d > add_months(mx, -12) THEN v END) AS v\n",
+        "  FROM base CROSS JOIN b GROUP BY base.flow, base.category\n",
+        ")\n",
+        "SELECT\n",
+        "  flow,\n",
+        "  category,\n",
+        "  round(v / 1e9, 3)                                        AS value_bn,\n",
+        "  row_number() OVER (PARTITION BY flow ORDER BY v DESC)    AS rank_overall\n",
+        "FROM agg WHERE v IS NOT NULL\n"
+      ]
+    },
+    {
+      "name": "ds_coverage",
+      "displayName": "Coverage",
+      "queryLines": [
+        "-- How complete each source pipeline is, straight from the coverage views.\n",
+        "SELECT\n",
+        "  workstream,\n",
+        "  count(*)                                                          AS expected_periods,\n",
+        "  sum(CASE WHEN status = 'ok' THEN 1 ELSE 0 END)                    AS complete,\n",
+        "  sum(CASE WHEN status = 'incomplete' THEN 1 ELSE 0 END)            AS incomplete,\n",
+        "  sum(CASE WHEN status = 'missing' THEN 1 ELSE 0 END)               AS missing,\n",
+        "  sum(CASE WHEN status = 'source_unavailable' THEN 1 ELSE 0 END)    AS never_published,\n",
+        "  sum(CASE WHEN status <> 'ok' AND NOT is_recent THEN 1 ELSE 0 END) AS actionable_gaps,\n",
+        "  min(period)                                                       AS first_period,\n",
+        "  max(CASE WHEN status = 'ok' THEN period END)                      AS last_complete_period\n",
+        "FROM market_data.customs.customs_coverage\n",
+        "GROUP BY workstream\n"
+      ]
+    },
+    {
+      "name": "ds_grain_reconciliation",
+      "displayName": "Grain Reconciliation",
+      "queryLines": [
+        "-- Sanity panel: how each breakdown compares with the official national total.\n",
+        "-- Provinces reconcile to the dollar; the country grain runs a few per cent high\n",
+        "-- because its per-category residual is floored at zero. Shown, not hidden.\n",
+        "WITH t AS (\n",
+        "  SELECT report_month, trade_flow, sum(period_value_usd) AS tot\n",
+        "  FROM market_data.customs.curated_trade_statistics_unified WHERE grain_type = 'total' AND report_month IS NOT NULL GROUP BY 1, 2\n",
+        "),\n",
+        "g AS (\n",
+        "  SELECT report_month, trade_flow, grain_type, sum(period_value_usd) AS v\n",
+        "  FROM market_data.customs.curated_trade_statistics_unified\n",
+        "  WHERE grain_type IN ('country', 'province') AND report_month IS NOT NULL\n",
+        "  GROUP BY 1, 2, 3\n",
+        "  UNION ALL\n",
+        "  SELECT report_month, trade_flow, 'fdi + domestic', sum(period_value_usd)\n",
+        "  FROM market_data.customs.curated_trade_statistics_unified WHERE grain_type = 'fdi' AND report_month IS NOT NULL GROUP BY 1, 2\n",
+        ")\n",
+        "SELECT\n",
+        "  to_date(t.report_month || '-01')                              AS report_date,\n",
+        "  t.report_month,\n",
+        "  initcap(t.trade_flow)                                         AS flow,\n",
+        "  g.grain_type                                                  AS breakdown,\n",
+        "  round((g.v / nullif(t.tot, 0) - 1) * 100, 2)                  AS deviation_pct\n",
+        "FROM t JOIN g ON g.report_month = t.report_month AND g.trade_flow = t.trade_flow\n"
+      ]
+    }
+  ],
+  "pages": [
+    {
+      "name": "overview",
+      "displayName": "Overview",
+      "layout": [
+        {
+          "widget": {
+            "name": "ov_title",
+            "multilineTextboxSpec": {
+              "lines": [
+                "# Vietnam Import & Export Statistics\n",
+                "Official General Department of Vietnam Customs figures, 2018 to date. ",
+                "Headline numbers on this page are national totals; the tabs above break the ",
+                "same trade down by product, partner country, province, transport mode and ",
+                "enterprise ownership.\n"
+              ]
+            }
+          },
+          "position": {
+            "x": 0,
+            "y": 0,
+            "width": 12,
+            "height": 2
+          }
+        },
+        {
+          "widget": {
+            "name": "ov_latest",
+            "queries": [
+              {
+                "name": "main_query",
+                "query": {
+                  "datasetName": "ds_kpi",
+                  "fields": [
+                    {
+                      "name": "latest_month",
+                      "expression": "`latest_month`"
+                    }
+                  ],
+                  "disaggregated": false
+                }
+              }
+            ],
+            "spec": {
+              "version": 2,
+              "frame": {
+                "showTitle": true,
+                "title": "Latest published month"
+              },
+              "widgetType": "counter",
+              "encodings": {
+                "value": {
+                  "fieldName": "latest_month"
+                }
+              },
+              "data": {
+                "queryName": "main_query"
+              }
+            }
+          },
+          "position": {
+            "x": 0,
+            "y": 2,
+            "width": 2,
+            "height": 3
+          }
+        },
+        {
+          "widget": {
+            "name": "ov_exports",
+            "queries": [
+              {
+                "name": "main_query",
+                "query": {
+                  "datasetName": "ds_kpi",
+                  "fields": [
+                    {
+                      "name": "exports_bn",
+                      "expression": "`exports_bn`"
+                    }
+                  ],
+                  "disaggregated": false
+                }
+              }
+            ],
+            "spec": {
+              "version": 2,
+              "frame": {
+                "showTitle": true,
+                "title": "Exports · last 12 months (US$ bn)",
+                "showDescription": true,
+                "description": "Rolling 12 months ending at the latest published month"
+              },
+              "widgetType": "counter",
+              "encodings": {
+                "value": {
+                  "fieldName": "exports_bn"
+                }
+              },
+              "data": {
+                "queryName": "main_query"
+              }
+            }
+          },
+          "position": {
+            "x": 2,
+            "y": 2,
+            "width": 3,
+            "height": 3
+          }
+        },
+        {
+          "widget": {
+            "name": "ov_imports",
+            "queries": [
+              {
+                "name": "main_query",
+                "query": {
+                  "datasetName": "ds_kpi",
+                  "fields": [
+                    {
+                      "name": "imports_bn",
+                      "expression": "`imports_bn`"
+                    }
+                  ],
+                  "disaggregated": false
+                }
+              }
+            ],
+            "spec": {
+              "version": 2,
+              "frame": {
+                "showTitle": true,
+                "title": "Imports · last 12 months (US$ bn)",
+                "showDescription": true,
+                "description": "Rolling 12 months ending at the latest published month"
+              },
+              "widgetType": "counter",
+              "encodings": {
+                "value": {
+                  "fieldName": "imports_bn"
+                }
+              },
+              "data": {
+                "queryName": "main_query"
+              }
+            }
+          },
+          "position": {
+            "x": 5,
+            "y": 2,
+            "width": 3,
+            "height": 3
+          }
+        },
+        {
+          "widget": {
+            "name": "ov_balance",
+            "queries": [
+              {
+                "name": "main_query",
+                "query": {
+                  "datasetName": "ds_kpi",
+                  "fields": [
+                    {
+                      "name": "balance_bn",
+                      "expression": "`balance_bn`"
+                    }
+                  ],
+                  "disaggregated": false
+                }
+              }
+            ],
+            "spec": {
+              "version": 2,
+              "frame": {
+                "showTitle": true,
+                "title": "Trade balance · last 12 months (US$ bn)",
+                "showDescription": true,
+                "description": "Exports minus imports. Green = surplus, orange = deficit."
+              },
+              "widgetType": "counter",
+              "encodings": {
+                "value": {
+                  "fieldName": "balance_bn",
+                  "style": {
+                    "rules": [
+                      {
+                        "condition": {
+                          "operator": ">=",
+                          "value": 0
+                        },
+                        "color": "#00A972"
+                      },
+                      {
+                        "condition": {
+                          "operator": "<",
+                          "value": 0
+                        },
+                        "color": "#FF8C00"
+                      }
+                    ]
+                  }
+                }
+              },
+              "data": {
+                "queryName": "main_query"
+              }
+            }
+          },
+          "position": {
+            "x": 8,
+            "y": 2,
+            "width": 2,
+            "height": 3
+          }
+        },
+        {
+          "widget": {
+            "name": "ov_turnover",
+            "queries": [
+              {
+                "name": "main_query",
+                "query": {
+                  "datasetName": "ds_kpi",
+                  "fields": [
+                    {
+                      "name": "turnover_bn",
+                      "expression": "`turnover_bn`"
+                    }
+                  ],
+                  "disaggregated": false
+                }
+              }
+            ],
+            "spec": {
+              "version": 2,
+              "frame": {
+                "showTitle": true,
+                "title": "Total turnover (US$ bn)",
+                "showDescription": true,
+                "description": "Exports plus imports over the last 12 months"
+              },
+              "widgetType": "counter",
+              "encodings": {
+                "value": {
+                  "fieldName": "turnover_bn"
+                }
+              },
+              "data": {
+                "queryName": "main_query"
+              }
+            }
+          },
+          "position": {
+            "x": 10,
+            "y": 2,
+            "width": 2,
+            "height": 3
+          }
+        },
+        {
+          "widget": {
+            "name": "ov_trend",
+            "queries": [
+              {
+                "name": "main_query",
+                "query": {
+                  "datasetName": "ds_national_monthly",
+                  "fields": [
+                    {
+                      "name": "report_date",
+                      "expression": "`report_date`"
+                    },
+                    {
+                      "name": "flow",
+                      "expression": "`flow`"
+                    },
+                    {
+                      "name": "sum(value_bn)",
+                      "expression": "SUM(`value_bn`)"
+                    }
+                  ],
+                  "disaggregated": false
+                }
+              }
+            ],
+            "spec": {
+              "version": 3,
+              "widgetType": "line",
+              "frame": {
+                "showTitle": true,
+                "title": "Monthly exports and imports",
+                "showDescription": true,
+                "description": "National totals. Every other view on this dashboard is a breakdown of these two lines."
+              },
+              "encodings": {
+                "x": {
+                  "fieldName": "report_date",
+                  "scale": {
+                    "type": "temporal"
+                  },
+                  "axis": {
+                    "title": "Month"
+                  }
+                },
+                "y": {
+                  "fieldName": "sum(value_bn)",
+                  "scale": {
+                    "type": "quantitative"
+                  },
+                  "axis": {
+                    "title": "US$ billion"
+                  }
+                },
+                "color": {
+                  "fieldName": "flow",
+                  "scale": {
+                    "type": "categorical",
+                    "mappings": [
+                      {
+                        "value": "Export",
+                        "color": "#00A972"
+                      },
+                      {
+                        "value": "Import",
+                        "color": "#FF8C00"
+                      }
+                    ]
+                  },
+                  "legend": {
+                    "title": "Flow"
+                  }
+                }
+              },
+              "data": {
+                "queryName": "main_query"
+              }
+            }
+          },
+          "position": {
+            "x": 0,
+            "y": 5,
+            "width": 12,
+            "height": 7
+          }
+        },
+        {
+          "widget": {
+            "name": "ov_balance_chart",
+            "queries": [
+              {
+                "name": "main_query",
+                "query": {
+                  "datasetName": "ds_national_balance",
+                  "fields": [
+                    {
+                      "name": "report_date",
+                      "expression": "`report_date`"
+                    },
+                    {
+                      "name": "sum(balance_bn)",
+                      "expression": "SUM(`balance_bn`)"
+                    }
+                  ],
+                  "disaggregated": false
+                }
+              }
+            ],
+            "spec": {
+              "version": 3,
+              "widgetType": "bar",
+              "frame": {
+                "showTitle": true,
+                "title": "Monthly trade balance",
+                "showDescription": true,
+                "description": "Above zero is a surplus month, below zero a deficit."
+              },
+              "encodings": {
+                "x": {
+                  "fieldName": "report_date",
+                  "scale": {
+                    "type": "temporal"
+                  },
+                  "axis": {
+                    "title": "Month"
+                  }
+                },
+                "y": {
+                  "fieldName": "sum(balance_bn)",
+                  "scale": {
+                    "type": "quantitative"
+                  },
+                  "axis": {
+                    "title": "US$ billion"
+                  }
+                }
+              },
+              "data": {
+                "queryName": "main_query"
+              }
+            }
+          },
+          "position": {
+            "x": 0,
+            "y": 12,
+            "width": 6,
+            "height": 6
+          }
+        },
+        {
+          "widget": {
+            "name": "ov_annual",
+            "queries": [
+              {
+                "name": "main_query",
+                "query": {
+                  "datasetName": "ds_annual",
+                  "fields": [
+                    {
+                      "name": "report_year",
+                      "expression": "`report_year`"
+                    },
+                    {
+                      "name": "flow",
+                      "expression": "`flow`"
+                    },
+                    {
+                      "name": "sum(value_bn)",
+                      "expression": "SUM(`value_bn`)"
+                    }
+                  ],
+                  "disaggregated": false
+                }
+              }
+            ],
+            "spec": {
+              "version": 3,
+              "widgetType": "bar",
+              "frame": {
+                "showTitle": true,
+                "title": "Annual totals",
+                "showDescription": true,
+                "description": "The most recent year is partial - it only covers the months published so far."
+              },
+              "encodings": {
+                "x": {
+                  "fieldName": "report_year",
+                  "scale": {
+                    "type": "categorical"
+                  },
+                  "axis": {
+                    "title": "Year"
+                  }
+                },
+                "y": {
+                  "fieldName": "sum(value_bn)",
+                  "scale": {
+                    "type": "quantitative"
+                  },
+                  "axis": {
+                    "title": "US$ billion"
+                  }
+                },
+                "color": {
+                  "fieldName": "flow",
+                  "scale": {
+                    "type": "categorical",
+                    "mappings": [
+                      {
+                        "value": "Export",
+                        "color": "#00A972"
+                      },
+                      {
+                        "value": "Import",
+                        "color": "#FF8C00"
+                      }
+                    ]
+                  },
+                  "legend": {
+                    "title": "Flow"
+                  }
+                }
+              },
+              "data": {
+                "queryName": "main_query"
+              }
+            }
+          },
+          "position": {
+            "x": 6,
+            "y": 12,
+            "width": 6,
+            "height": 6
+          }
+        },
+        {
+          "widget": {
+            "name": "ov_h_products",
+            "multilineTextboxSpec": {
+              "lines": [
+                "## What Vietnam trades"
+              ]
+            }
+          },
+          "position": {
+            "x": 0,
+            "y": 18,
+            "width": 12,
+            "height": 1
+          }
+        },
+        {
+          "widget": {
+            "name": "ov_top_exp_prod",
+            "queries": [
+              {
+                "name": "main_query",
+                "query": {
+                  "datasetName": "ds_products",
+                  "fields": [
+                    {
+                      "name": "category",
+                      "expression": "`category`"
+                    },
+                    {
+                      "name": "sum(value_bn)",
+                      "expression": "SUM(`value_bn`)"
+                    }
+                  ],
+                  "disaggregated": false,
+                  "filters": [
+                    {
+                      "expression": "`flow` = 'Export'"
+                    },
+                    {
+                      "expression": "`rank_overall` <= 12"
+                    }
+                  ]
+                }
+              }
+            ],
+            "spec": {
+              "version": 3,
+              "widgetType": "bar",
+              "frame": {
+                "showTitle": true,
+                "title": "Top 12 export categories · all years"
+              },
+              "encodings": {
+                "y": {
+                  "fieldName": "category",
+                  "scale": {
+                    "type": "categorical",
+                    "sort": {
+                      "by": "x-reversed"
+                    }
+                  },
+                  "axis": {
+                    "title": ""
+                  }
+                },
+                "x": {
+                  "fieldName": "sum(value_bn)",
+                  "scale": {
+                    "type": "quantitative"
+                  },
+                  "axis": {
+                    "title": "US$ billion"
+                  }
+                }
+              },
+              "data": {
+                "queryName": "main_query"
+              }
+            }
+          },
+          "position": {
+            "x": 0,
+            "y": 19,
+            "width": 6,
+            "height": 8
+          }
+        },
+        {
+          "widget": {
+            "name": "ov_top_imp_prod",
+            "queries": [
+              {
+                "name": "main_query",
+                "query": {
+                  "datasetName": "ds_products",
+                  "fields": [
+                    {
+                      "name": "category",
+                      "expression": "`category`"
+                    },
+                    {
+                      "name": "sum(value_bn)",
+                      "expression": "SUM(`value_bn`)"
+                    }
+                  ],
+                  "disaggregated": false,
+                  "filters": [
+                    {
+                      "expression": "`flow` = 'Import'"
+                    },
+                    {
+                      "expression": "`rank_overall` <= 12"
+                    }
+                  ]
+                }
+              }
+            ],
+            "spec": {
+              "version": 3,
+              "widgetType": "bar",
+              "frame": {
+                "showTitle": true,
+                "title": "Top 12 import categories · all years"
+              },
+              "encodings": {
+                "y": {
+                  "fieldName": "category",
+                  "scale": {
+                    "type": "categorical",
+                    "sort": {
+                      "by": "x-reversed"
+                    }
+                  },
+                  "axis": {
+                    "title": ""
+                  }
+                },
+                "x": {
+                  "fieldName": "sum(value_bn)",
+                  "scale": {
+                    "type": "quantitative"
+                  },
+                  "axis": {
+                    "title": "US$ billion"
+                  }
+                }
+              },
+              "data": {
+                "queryName": "main_query"
+              }
+            }
+          },
+          "position": {
+            "x": 6,
+            "y": 19,
+            "width": 6,
+            "height": 8
+          }
+        },
+        {
+          "widget": {
+            "name": "ov_h_partners",
+            "multilineTextboxSpec": {
+              "lines": [
+                "## Who Vietnam trades with"
+              ]
+            }
+          },
+          "position": {
+            "x": 0,
+            "y": 27,
+            "width": 12,
+            "height": 1
+          }
+        },
+        {
+          "widget": {
+            "name": "ov_top_partners",
+            "queries": [
+              {
+                "name": "main_query",
+                "query": {
+                  "datasetName": "ds_country_balance",
+                  "fields": [
+                    {
+                      "name": "country",
+                      "expression": "`country`"
+                    },
+                    {
+                      "name": "sum(exports_bn)",
+                      "expression": "SUM(`exports_bn`)"
+                    },
+                    {
+                      "name": "sum(imports_bn)",
+                      "expression": "SUM(`imports_bn`)"
+                    }
+                  ],
+                  "disaggregated": false,
+                  "filters": [
+                    {
+                      "expression": "`rank_overall` <= 12"
+                    }
+                  ]
+                }
+              }
+            ],
+            "spec": {
+              "version": 3,
+              "widgetType": "bar",
+              "frame": {
+                "showTitle": true,
+                "title": "Top 12 partners by total trade · last 12 months"
+              },
+              "encodings": {
+                "y": {
+                  "fieldName": "country",
+                  "scale": {
+                    "type": "categorical",
+                    "sort": {
+                      "by": "x-reversed"
+                    }
+                  },
+                  "axis": {
+                    "title": ""
+                  }
+                },
+                "x": {
+                  "fields": [
+                    {
+                      "fieldName": "sum(exports_bn)",
+                      "displayName": "Vietnam exports to"
+                    },
+                    {
+                      "fieldName": "sum(imports_bn)",
+                      "displayName": "Vietnam imports from"
+                    }
+                  ],
+                  "scale": {
+                    "type": "quantitative"
+                  },
+                  "axis": {
+                    "title": "US$ billion"
+                  }
+                }
+              },
+              "data": {
+                "queryName": "main_query"
+              }
+            }
+          },
+          "position": {
+            "x": 0,
+            "y": 28,
+            "width": 6,
+            "height": 8
+          }
+        },
+        {
+          "widget": {
+            "name": "ov_partner_balance",
+            "queries": [
+              {
+                "name": "main_query",
+                "query": {
+                  "datasetName": "ds_country_balance",
+                  "fields": [
+                    {
+                      "name": "country",
+                      "expression": "`country`"
+                    },
+                    {
+                      "name": "sum(balance_bn)",
+                      "expression": "SUM(`balance_bn`)"
+                    }
+                  ],
+                  "disaggregated": false,
+                  "filters": [
+                    {
+                      "expression": "`rank_overall` <= 12"
+                    }
+                  ]
+                }
+              }
+            ],
+            "spec": {
+              "version": 3,
+              "widgetType": "bar",
+              "frame": {
+                "showTitle": true,
+                "title": "Surplus and deficit by partner · last 12 months",
+                "showDescription": true,
+                "description": "Positive means Vietnam sells more than it buys."
+              },
+              "encodings": {
+                "y": {
+                  "fieldName": "country",
+                  "scale": {
+                    "type": "categorical",
+                    "sort": {
+                      "by": "x-reversed"
+                    }
+                  },
+                  "axis": {
+                    "title": ""
+                  }
+                },
+                "x": {
+                  "fieldName": "sum(balance_bn)",
+                  "scale": {
+                    "type": "quantitative"
+                  },
+                  "axis": {
+                    "title": "US$ billion"
+                  }
+                }
+              },
+              "data": {
+                "queryName": "main_query"
+              }
+            }
+          },
+          "position": {
+            "x": 6,
+            "y": 28,
+            "width": 6,
+            "height": 8
+          }
+        },
+        {
+          "widget": {
+            "name": "ov_footer",
+            "multilineTextboxSpec": {
+              "lines": [
+                "---\n",
+                "**Reading this dashboard.** The five breakdowns slice the same trade in different ways and must not be added together. Use this Overview page for headline figures - it is the only page built on the official national totals.\n",
+                "\n",
+                "Values are US dollars. Product and partner-country figures cover goods only. Transport-mode data is quarterly; everything else is monthly.\n"
+              ]
+            }
+          },
+          "position": {
+            "x": 0,
+            "y": 36,
+            "width": 12,
+            "height": 3
+          }
+        }
+      ]
+    },
+    {
+      "name": "products",
+      "displayName": "Products",
+      "layout": [
+        {
+          "widget": {
+            "name": "pr_title",
+            "multilineTextboxSpec": {
+              "lines": [
+                "## Products\n",
+                "What Vietnam actually ships and buys, from the national totals. Use the filters to narrow the period or the direction of trade.\n"
+              ]
+            }
+          },
+          "position": {
+            "x": 0,
+            "y": 0,
+            "width": 12,
+            "height": 2
+          }
+        },
+        {
+          "widget": {
+            "name": "pr_f_date",
+            "queries": [
+              {
+                "name": "pr_f_date_q0",
+                "query": {
+                  "datasetName": "ds_products",
+                  "fields": [
+                    {
+                      "name": "report_date",
+                      "expression": "`report_date`"
+                    },
+                    {
+                      "name": "report_date_associativity",
+                      "expression": "COUNT_IF(`associative_filter_predicate_group`)"
+                    }
+                  ],
+                  "disaggregated": false
+                }
+              }
+            ],
+            "spec": {
+              "version": 2,
+              "widgetType": "filter-date-range-picker",
+              "frame": {
+                "showTitle": true,
+                "title": "Period"
+              },
+              "encodings": {
+                "fields": [
+                  {
+                    "fieldName": "report_date",
+                    "queryName": "pr_f_date_q0"
+                  }
+                ]
+              }
+            }
+          },
+          "position": {
+            "x": 0,
+            "y": 2,
+            "width": 4,
+            "height": 2
+          }
+        },
+        {
+          "widget": {
+            "name": "pr_f_flow",
+            "queries": [
+              {
+                "name": "pr_f_flow_q0",
+                "query": {
+                  "datasetName": "ds_products",
+                  "fields": [
+                    {
+                      "name": "flow",
+                      "expression": "`flow`"
+                    },
+                    {
+                      "name": "flow_associativity",
+                      "expression": "COUNT_IF(`associative_filter_predicate_group`)"
+                    }
+                  ],
+                  "disaggregated": false
+                }
+              }
+            ],
+            "spec": {
+              "version": 2,
+              "widgetType": "filter-single-select",
+              "frame": {
+                "showTitle": true,
+                "title": "Trade flow"
+              },
+              "encodings": {
+                "fields": [
+                  {
+                    "fieldName": "flow",
+                    "queryName": "pr_f_flow_q0"
+                  }
+                ]
+              }
+            }
+          },
+          "position": {
+            "x": 4,
+            "y": 2,
+            "width": 4,
+            "height": 2
+          }
+        },
+        {
+          "widget": {
+            "name": "pr_f_cat",
+            "queries": [
+              {
+                "name": "pr_f_cat_q0",
+                "query": {
+                  "datasetName": "ds_products",
+                  "fields": [
+                    {
+                      "name": "category",
+                      "expression": "`category`"
+                    },
+                    {
+                      "name": "category_associativity",
+                      "expression": "COUNT_IF(`associative_filter_predicate_group`)"
+                    }
+                  ],
+                  "disaggregated": false
+                }
+              }
+            ],
+            "spec": {
+              "version": 2,
+              "widgetType": "filter-multi-select",
+              "frame": {
+                "showTitle": true,
+                "title": "Category"
+              },
+              "encodings": {
+                "fields": [
+                  {
+                    "fieldName": "category",
+                    "queryName": "pr_f_cat_q0"
+                  }
+                ]
+              }
+            }
+          },
+          "position": {
+            "x": 8,
+            "y": 2,
+            "width": 4,
+            "height": 2
+          }
+        },
+        {
+          "widget": {
+            "name": "pr_top",
+            "queries": [
+              {
+                "name": "main_query",
+                "query": {
+                  "datasetName": "ds_products",
+                  "fields": [
+                    {
+                      "name": "category",
+                      "expression": "`category`"
+                    },
+                    {
+                      "name": "flow",
+                      "expression": "`flow`"
+                    },
+                    {
+                      "name": "sum(value_bn)",
+                      "expression": "SUM(`value_bn`)"
+                    }
+                  ],
+                  "disaggregated": false,
+                  "filters": [
+                    {
+                      "expression": "`rank_overall` <= 15"
+                    }
+                  ]
+                }
+              }
+            ],
+            "spec": {
+              "version": 3,
+              "widgetType": "bar",
+              "frame": {
+                "showTitle": true,
+                "title": "Top 15 categories in the selected period"
+              },
+              "encodings": {
+                "y": {
+                  "fieldName": "category",
+                  "scale": {
+                    "type": "categorical",
+                    "sort": {
+                      "by": "x-reversed"
+                    }
+                  },
+                  "axis": {
+                    "title": ""
+                  }
+                },
+                "x": {
+                  "fieldName": "sum(value_bn)",
+                  "scale": {
+                    "type": "quantitative"
+                  },
+                  "axis": {
+                    "title": "US$ billion"
+                  }
+                },
+                "color": {
+                  "fieldName": "flow",
+                  "scale": {
+                    "type": "categorical",
+                    "mappings": [
+                      {
+                        "value": "Export",
+                        "color": "#00A972"
+                      },
+                      {
+                        "value": "Import",
+                        "color": "#FF8C00"
+                      }
+                    ]
+                  },
+                  "legend": {
+                    "title": "Flow"
+                  }
+                }
+              },
+              "data": {
+                "queryName": "main_query"
+              }
+            }
+          },
+          "position": {
+            "x": 0,
+            "y": 4,
+            "width": 12,
+            "height": 9
+          }
+        },
+        {
+          "widget": {
+            "name": "pr_trend",
+            "queries": [
+              {
+                "name": "main_query",
+                "query": {
+                  "datasetName": "ds_products",
+                  "fields": [
+                    {
+                      "name": "report_date",
+                      "expression": "`report_date`"
+                    },
+                    {
+                      "name": "category",
+                      "expression": "`category`"
+                    },
+                    {
+                      "name": "sum(value_bn)",
+                      "expression": "SUM(`value_bn`)"
+                    }
+                  ],
+                  "disaggregated": false,
+                  "filters": [
+                    {
+                      "expression": "`rank_overall` <= 8"
+                    }
+                  ]
+                }
+              }
+            ],
+            "spec": {
+              "version": 3,
+              "widgetType": "line",
+              "frame": {
+                "showTitle": true,
+                "title": "How the top 8 categories have moved"
+              },
+              "encodings": {
+                "x": {
+                  "fieldName": "report_date",
+                  "scale": {
+                    "type": "temporal"
+                  },
+                  "axis": {
+                    "title": "Month"
+                  }
+                },
+                "y": {
+                  "fieldName": "sum(value_bn)",
+                  "scale": {
+                    "type": "quantitative"
+                  },
+                  "axis": {
+                    "title": "US$ billion"
+                  }
+                },
+                "color": {
+                  "fieldName": "category",
+                  "scale": {
+                    "type": "categorical"
+                  },
+                  "axis": {
+                    "title": ""
+                  }
+                }
+              },
+              "data": {
+                "queryName": "main_query"
+              }
+            }
+          },
+          "position": {
+            "x": 0,
+            "y": 13,
+            "width": 12,
+            "height": 8
+          }
+        },
+        {
+          "widget": {
+            "name": "pr_share",
+            "queries": [
+              {
+                "name": "main_query",
+                "query": {
+                  "datasetName": "ds_products",
+                  "fields": [
+                    {
+                      "name": "category",
+                      "expression": "`category`"
+                    },
+                    {
+                      "name": "sum(value_bn)",
+                      "expression": "SUM(`value_bn`)"
+                    }
+                  ],
+                  "disaggregated": false,
+                  "filters": [
+                    {
+                      "expression": "`rank_overall` <= 10"
+                    }
+                  ]
+                }
+              }
+            ],
+            "spec": {
+              "version": 3,
+              "widgetType": "pie",
+              "frame": {
+                "showTitle": true,
+                "title": "Trade mix · top 10 categories",
+                "showDescription": true,
+                "description": "Combines both directions unless you pick one with the Trade flow filter."
+              },
+              "encodings": {
+                "angle": {
+                  "fieldName": "sum(value_bn)",
+                  "scale": {
+                    "type": "quantitative"
+                  },
+                  "axis": {
+                    "title": "US$ billion"
+                  }
+                },
+                "color": {
+                  "fieldName": "category",
+                  "scale": {
+                    "type": "categorical"
+                  },
+                  "axis": {
+                    "title": ""
+                  }
+                }
+              },
+              "data": {
+                "queryName": "main_query"
+              }
+            }
+          },
+          "position": {
+            "x": 0,
+            "y": 21,
+            "width": 5,
+            "height": 8
+          }
+        },
+        {
+          "widget": {
+            "name": "pr_table",
+            "queries": [
+              {
+                "name": "main_query",
+                "query": {
+                  "datasetName": "ds_product_summary",
+                  "fields": [
+                    {
+                      "name": "category",
+                      "expression": "`category`"
+                    },
+                    {
+                      "name": "flow",
+                      "expression": "`flow`"
+                    },
+                    {
+                      "name": "last_12m_bn",
+                      "expression": "`last_12m_bn`"
+                    },
+                    {
+                      "name": "prior_12m_bn",
+                      "expression": "`prior_12m_bn`"
+                    },
+                    {
+                      "name": "yoy_pct",
+                      "expression": "`yoy_pct`"
+                    },
+                    {
+                      "name": "share_pct",
+                      "expression": "`share_pct`"
+                    }
+                  ],
+                  "disaggregated": true,
+                  "filters": [
+                    {
+                      "expression": "`rank_overall` <= 25"
+                    }
+                  ],
+                  "orders": [
+                    {
+                      "direction": "DESC",
+                      "expression": "`last_12m_bn`",
+                      "name": "last_12m_bn"
+                    }
+                  ]
+                }
+              }
+            ],
+            "spec": {
+              "version": 1,
+              "widgetType": "table",
+              "frame": {
+                "showTitle": true,
+                "title": "Category league table · last 12 months",
+                "showDescription": true,
+                "description": "Fixed 12-month window - the period filter above does not apply to this table."
+              },
+              "encodings": {
+                "columns": [
+                  {
+                    "booleanValues": [
+                      "false",
+                      "true"
+                    ],
+                    "imageUrlTemplate": "{{ @ }}",
+                    "imageTitleTemplate": "{{ @ }}",
+                    "imageWidth": "",
+                    "imageHeight": "",
+                    "linkUrlTemplate": "{{ @ }}",
+                    "linkTextTemplate": "{{ @ }}",
+                    "linkTitleTemplate": "{{ @ }}",
+                    "linkOpenInNewTab": true,
+                    "allowSearch": false,
+                    "allowHTML": false,
+                    "highlightLinks": false,
+                    "useMonospaceFont": false,
+                    "preserveWhitespace": false,
+                    "fieldName": "category",
+                    "title": "Category",
+                    "visible": true,
+                    "order": 0,
+                    "type": "string",
+                    "displayAs": "string",
+                    "alignContent": "left"
+                  },
+                  {
+                    "booleanValues": [
+                      "false",
+                      "true"
+                    ],
+                    "imageUrlTemplate": "{{ @ }}",
+                    "imageTitleTemplate": "{{ @ }}",
+                    "imageWidth": "",
+                    "imageHeight": "",
+                    "linkUrlTemplate": "{{ @ }}",
+                    "linkTextTemplate": "{{ @ }}",
+                    "linkTitleTemplate": "{{ @ }}",
+                    "linkOpenInNewTab": true,
+                    "allowSearch": false,
+                    "allowHTML": false,
+                    "highlightLinks": false,
+                    "useMonospaceFont": false,
+                    "preserveWhitespace": false,
+                    "fieldName": "flow",
+                    "title": "Flow",
+                    "visible": true,
+                    "order": 1,
+                    "type": "string",
+                    "displayAs": "string",
+                    "alignContent": "left"
+                  },
+                  {
+                    "booleanValues": [
+                      "false",
+                      "true"
+                    ],
+                    "imageUrlTemplate": "{{ @ }}",
+                    "imageTitleTemplate": "{{ @ }}",
+                    "imageWidth": "",
+                    "imageHeight": "",
+                    "linkUrlTemplate": "{{ @ }}",
+                    "linkTextTemplate": "{{ @ }}",
+                    "linkTitleTemplate": "{{ @ }}",
+                    "linkOpenInNewTab": true,
+                    "allowSearch": false,
+                    "allowHTML": false,
+                    "highlightLinks": false,
+                    "useMonospaceFont": false,
+                    "preserveWhitespace": false,
+                    "fieldName": "last_12m_bn",
+                    "title": "Last 12m (US$ bn)",
+                    "visible": true,
+                    "order": 2,
+                    "type": "float",
+                    "displayAs": "number",
+                    "alignContent": "right",
+                    "numberFormat": "0,0.00"
+                  },
+                  {
+                    "booleanValues": [
+                      "false",
+                      "true"
+                    ],
+                    "imageUrlTemplate": "{{ @ }}",
+                    "imageTitleTemplate": "{{ @ }}",
+                    "imageWidth": "",
+                    "imageHeight": "",
+                    "linkUrlTemplate": "{{ @ }}",
+                    "linkTextTemplate": "{{ @ }}",
+                    "linkTitleTemplate": "{{ @ }}",
+                    "linkOpenInNewTab": true,
+                    "allowSearch": false,
+                    "allowHTML": false,
+                    "highlightLinks": false,
+                    "useMonospaceFont": false,
+                    "preserveWhitespace": false,
+                    "fieldName": "prior_12m_bn",
+                    "title": "Prior 12m (US$ bn)",
+                    "visible": true,
+                    "order": 3,
+                    "type": "float",
+                    "displayAs": "number",
+                    "alignContent": "right",
+                    "numberFormat": "0,0.00"
+                  },
+                  {
+                    "booleanValues": [
+                      "false",
+                      "true"
+                    ],
+                    "imageUrlTemplate": "{{ @ }}",
+                    "imageTitleTemplate": "{{ @ }}",
+                    "imageWidth": "",
+                    "imageHeight": "",
+                    "linkUrlTemplate": "{{ @ }}",
+                    "linkTextTemplate": "{{ @ }}",
+                    "linkTitleTemplate": "{{ @ }}",
+                    "linkOpenInNewTab": true,
+                    "allowSearch": false,
+                    "allowHTML": false,
+                    "highlightLinks": false,
+                    "useMonospaceFont": false,
+                    "preserveWhitespace": false,
+                    "fieldName": "yoy_pct",
+                    "title": "Change %",
+                    "visible": true,
+                    "order": 4,
+                    "type": "float",
+                    "displayAs": "number",
+                    "alignContent": "right",
+                    "numberFormat": "0,0.00"
+                  },
+                  {
+                    "booleanValues": [
+                      "false",
+                      "true"
+                    ],
+                    "imageUrlTemplate": "{{ @ }}",
+                    "imageTitleTemplate": "{{ @ }}",
+                    "imageWidth": "",
+                    "imageHeight": "",
+                    "linkUrlTemplate": "{{ @ }}",
+                    "linkTextTemplate": "{{ @ }}",
+                    "linkTitleTemplate": "{{ @ }}",
+                    "linkOpenInNewTab": true,
+                    "allowSearch": false,
+                    "allowHTML": false,
+                    "highlightLinks": false,
+                    "useMonospaceFont": false,
+                    "preserveWhitespace": false,
+                    "fieldName": "share_pct",
+                    "title": "Share of flow %",
+                    "visible": true,
+                    "order": 5,
+                    "type": "float",
+                    "displayAs": "number",
+                    "alignContent": "right",
+                    "numberFormat": "0,0.00"
+                  }
+                ]
+              }
+            }
+          },
+          "position": {
+            "x": 5,
+            "y": 21,
+            "width": 7,
+            "height": 8
+          }
+        }
+      ]
+    },
+    {
+      "name": "partners",
+      "displayName": "Trading partners",
+      "layout": [
+        {
+          "widget": {
+            "name": "pa_title",
+            "multilineTextboxSpec": {
+              "lines": [
+                "## Trading partners\n",
+                "Where the goods go and where they come from.\n"
+              ]
+            }
+          },
+          "position": {
+            "x": 0,
+            "y": 0,
+            "width": 12,
+            "height": 2
+          }
+        },
+        {
+          "widget": {
+            "name": "pa_f_date",
+            "queries": [
+              {
+                "name": "pa_f_date_q0",
+                "query": {
+                  "datasetName": "ds_countries",
+                  "fields": [
+                    {
+                      "name": "report_date",
+                      "expression": "`report_date`"
+                    },
+                    {
+                      "name": "report_date_associativity",
+                      "expression": "COUNT_IF(`associative_filter_predicate_group`)"
+                    }
+                  ],
+                  "disaggregated": false
+                }
+              }
+            ],
+            "spec": {
+              "version": 2,
+              "widgetType": "filter-date-range-picker",
+              "frame": {
+                "showTitle": true,
+                "title": "Period"
+              },
+              "encodings": {
+                "fields": [
+                  {
+                    "fieldName": "report_date",
+                    "queryName": "pa_f_date_q0"
+                  }
+                ]
+              }
+            }
+          },
+          "position": {
+            "x": 0,
+            "y": 2,
+            "width": 4,
+            "height": 2
+          }
+        },
+        {
+          "widget": {
+            "name": "pa_f_flow",
+            "queries": [
+              {
+                "name": "pa_f_flow_q0",
+                "query": {
+                  "datasetName": "ds_countries",
+                  "fields": [
+                    {
+                      "name": "flow",
+                      "expression": "`flow`"
+                    },
+                    {
+                      "name": "flow_associativity",
+                      "expression": "COUNT_IF(`associative_filter_predicate_group`)"
+                    }
+                  ],
+                  "disaggregated": false
+                }
+              }
+            ],
+            "spec": {
+              "version": 2,
+              "widgetType": "filter-single-select",
+              "frame": {
+                "showTitle": true,
+                "title": "Trade flow"
+              },
+              "encodings": {
+                "fields": [
+                  {
+                    "fieldName": "flow",
+                    "queryName": "pa_f_flow_q0"
+                  }
+                ]
+              }
+            }
+          },
+          "position": {
+            "x": 4,
+            "y": 2,
+            "width": 4,
+            "height": 2
+          }
+        },
+        {
+          "widget": {
+            "name": "pa_f_country",
+            "queries": [
+              {
+                "name": "pa_f_country_q0",
+                "query": {
+                  "datasetName": "ds_countries",
+                  "fields": [
+                    {
+                      "name": "country",
+                      "expression": "`country`"
+                    },
+                    {
+                      "name": "country_associativity",
+                      "expression": "COUNT_IF(`associative_filter_predicate_group`)"
+                    }
+                  ],
+                  "disaggregated": false
+                }
+              }
+            ],
+            "spec": {
+              "version": 2,
+              "widgetType": "filter-multi-select",
+              "frame": {
+                "showTitle": true,
+                "title": "Country"
+              },
+              "encodings": {
+                "fields": [
+                  {
+                    "fieldName": "country",
+                    "queryName": "pa_f_country_q0"
+                  }
+                ]
+              }
+            }
+          },
+          "position": {
+            "x": 8,
+            "y": 2,
+            "width": 4,
+            "height": 2
+          }
+        },
+        {
+          "widget": {
+            "name": "pa_top",
+            "queries": [
+              {
+                "name": "main_query",
+                "query": {
+                  "datasetName": "ds_countries",
+                  "fields": [
+                    {
+                      "name": "country",
+                      "expression": "`country`"
+                    },
+                    {
+                      "name": "flow",
+                      "expression": "`flow`"
+                    },
+                    {
+                      "name": "sum(value_bn)",
+                      "expression": "SUM(`value_bn`)"
+                    }
+                  ],
+                  "disaggregated": false,
+                  "filters": [
+                    {
+                      "expression": "`rank_overall` <= 15"
+                    }
+                  ]
+                }
+              }
+            ],
+            "spec": {
+              "version": 3,
+              "widgetType": "bar",
+              "frame": {
+                "showTitle": true,
+                "title": "Top 15 partners in the selected period"
+              },
+              "encodings": {
+                "y": {
+                  "fieldName": "country",
+                  "scale": {
+                    "type": "categorical",
+                    "sort": {
+                      "by": "x-reversed"
+                    }
+                  },
+                  "axis": {
+                    "title": ""
+                  }
+                },
+                "x": {
+                  "fieldName": "sum(value_bn)",
+                  "scale": {
+                    "type": "quantitative"
+                  },
+                  "axis": {
+                    "title": "US$ billion"
+                  }
+                },
+                "color": {
+                  "fieldName": "flow",
+                  "scale": {
+                    "type": "categorical",
+                    "mappings": [
+                      {
+                        "value": "Export",
+                        "color": "#00A972"
+                      },
+                      {
+                        "value": "Import",
+                        "color": "#FF8C00"
+                      }
+                    ]
+                  },
+                  "legend": {
+                    "title": "Flow"
+                  }
+                }
+              },
+              "data": {
+                "queryName": "main_query"
+              }
+            }
+          },
+          "position": {
+            "x": 0,
+            "y": 4,
+            "width": 12,
+            "height": 9
+          }
+        },
+        {
+          "widget": {
+            "name": "pa_trend",
+            "queries": [
+              {
+                "name": "main_query",
+                "query": {
+                  "datasetName": "ds_countries",
+                  "fields": [
+                    {
+                      "name": "report_date",
+                      "expression": "`report_date`"
+                    },
+                    {
+                      "name": "country",
+                      "expression": "`country`"
+                    },
+                    {
+                      "name": "sum(value_bn)",
+                      "expression": "SUM(`value_bn`)"
+                    }
+                  ],
+                  "disaggregated": false,
+                  "filters": [
+                    {
+                      "expression": "`rank_overall` <= 8"
+                    }
+                  ]
+                }
+              }
+            ],
+            "spec": {
+              "version": 3,
+              "widgetType": "line",
+              "frame": {
+                "showTitle": true,
+                "title": "How the top 8 partners have moved"
+              },
+              "encodings": {
+                "x": {
+                  "fieldName": "report_date",
+                  "scale": {
+                    "type": "temporal"
+                  },
+                  "axis": {
+                    "title": "Month"
+                  }
+                },
+                "y": {
+                  "fieldName": "sum(value_bn)",
+                  "scale": {
+                    "type": "quantitative"
+                  },
+                  "axis": {
+                    "title": "US$ billion"
+                  }
+                },
+                "color": {
+                  "fieldName": "country",
+                  "scale": {
+                    "type": "categorical"
+                  },
+                  "axis": {
+                    "title": ""
+                  }
+                }
+              },
+              "data": {
+                "queryName": "main_query"
+              }
+            }
+          },
+          "position": {
+            "x": 0,
+            "y": 13,
+            "width": 12,
+            "height": 8
+          }
+        },
+        {
+          "widget": {
+            "name": "pa_balance",
+            "queries": [
+              {
+                "name": "main_query",
+                "query": {
+                  "datasetName": "ds_country_balance",
+                  "fields": [
+                    {
+                      "name": "country",
+                      "expression": "`country`"
+                    },
+                    {
+                      "name": "sum(balance_bn)",
+                      "expression": "SUM(`balance_bn`)"
+                    }
+                  ],
+                  "disaggregated": false,
+                  "filters": [
+                    {
+                      "expression": "`rank_overall` <= 15"
+                    }
+                  ]
+                }
+              }
+            ],
+            "spec": {
+              "version": 3,
+              "widgetType": "bar",
+              "frame": {
+                "showTitle": true,
+                "title": "Surplus / deficit by partner · last 12 months"
+              },
+              "encodings": {
+                "y": {
+                  "fieldName": "country",
+                  "scale": {
+                    "type": "categorical",
+                    "sort": {
+                      "by": "x-reversed"
+                    }
+                  },
+                  "axis": {
+                    "title": ""
+                  }
+                },
+                "x": {
+                  "fieldName": "sum(balance_bn)",
+                  "scale": {
+                    "type": "quantitative"
+                  },
+                  "axis": {
+                    "title": "US$ billion"
+                  }
+                }
+              },
+              "data": {
+                "queryName": "main_query"
+              }
+            }
+          },
+          "position": {
+            "x": 0,
+            "y": 21,
+            "width": 5,
+            "height": 9
+          }
+        },
+        {
+          "widget": {
+            "name": "pa_table",
+            "queries": [
+              {
+                "name": "main_query",
+                "query": {
+                  "datasetName": "ds_country_balance",
+                  "fields": [
+                    {
+                      "name": "country",
+                      "expression": "`country`"
+                    },
+                    {
+                      "name": "exports_bn",
+                      "expression": "`exports_bn`"
+                    },
+                    {
+                      "name": "imports_bn",
+                      "expression": "`imports_bn`"
+                    },
+                    {
+                      "name": "balance_bn",
+                      "expression": "`balance_bn`"
+                    },
+                    {
+                      "name": "turnover_bn",
+                      "expression": "`turnover_bn`"
+                    },
+                    {
+                      "name": "position",
+                      "expression": "`position`"
+                    }
+                  ],
+                  "disaggregated": true,
+                  "filters": [
+                    {
+                      "expression": "`rank_overall` <= 30"
+                    }
+                  ],
+                  "orders": [
+                    {
+                      "direction": "DESC",
+                      "expression": "`turnover_bn`",
+                      "name": "turnover_bn"
+                    }
+                  ]
+                }
+              }
+            ],
+            "spec": {
+              "version": 1,
+              "widgetType": "table",
+              "frame": {
+                "showTitle": true,
+                "title": "Partner league table · last 12 months"
+              },
+              "encodings": {
+                "columns": [
+                  {
+                    "booleanValues": [
+                      "false",
+                      "true"
+                    ],
+                    "imageUrlTemplate": "{{ @ }}",
+                    "imageTitleTemplate": "{{ @ }}",
+                    "imageWidth": "",
+                    "imageHeight": "",
+                    "linkUrlTemplate": "{{ @ }}",
+                    "linkTextTemplate": "{{ @ }}",
+                    "linkTitleTemplate": "{{ @ }}",
+                    "linkOpenInNewTab": true,
+                    "allowSearch": false,
+                    "allowHTML": false,
+                    "highlightLinks": false,
+                    "useMonospaceFont": false,
+                    "preserveWhitespace": false,
+                    "fieldName": "country",
+                    "title": "Partner",
+                    "visible": true,
+                    "order": 0,
+                    "type": "string",
+                    "displayAs": "string",
+                    "alignContent": "left"
+                  },
+                  {
+                    "booleanValues": [
+                      "false",
+                      "true"
+                    ],
+                    "imageUrlTemplate": "{{ @ }}",
+                    "imageTitleTemplate": "{{ @ }}",
+                    "imageWidth": "",
+                    "imageHeight": "",
+                    "linkUrlTemplate": "{{ @ }}",
+                    "linkTextTemplate": "{{ @ }}",
+                    "linkTitleTemplate": "{{ @ }}",
+                    "linkOpenInNewTab": true,
+                    "allowSearch": false,
+                    "allowHTML": false,
+                    "highlightLinks": false,
+                    "useMonospaceFont": false,
+                    "preserveWhitespace": false,
+                    "fieldName": "exports_bn",
+                    "title": "Vietnam exports (US$ bn)",
+                    "visible": true,
+                    "order": 1,
+                    "type": "float",
+                    "displayAs": "number",
+                    "alignContent": "right",
+                    "numberFormat": "0,0.00"
+                  },
+                  {
+                    "booleanValues": [
+                      "false",
+                      "true"
+                    ],
+                    "imageUrlTemplate": "{{ @ }}",
+                    "imageTitleTemplate": "{{ @ }}",
+                    "imageWidth": "",
+                    "imageHeight": "",
+                    "linkUrlTemplate": "{{ @ }}",
+                    "linkTextTemplate": "{{ @ }}",
+                    "linkTitleTemplate": "{{ @ }}",
+                    "linkOpenInNewTab": true,
+                    "allowSearch": false,
+                    "allowHTML": false,
+                    "highlightLinks": false,
+                    "useMonospaceFont": false,
+                    "preserveWhitespace": false,
+                    "fieldName": "imports_bn",
+                    "title": "Vietnam imports (US$ bn)",
+                    "visible": true,
+                    "order": 2,
+                    "type": "float",
+                    "displayAs": "number",
+                    "alignContent": "right",
+                    "numberFormat": "0,0.00"
+                  },
+                  {
+                    "booleanValues": [
+                      "false",
+                      "true"
+                    ],
+                    "imageUrlTemplate": "{{ @ }}",
+                    "imageTitleTemplate": "{{ @ }}",
+                    "imageWidth": "",
+                    "imageHeight": "",
+                    "linkUrlTemplate": "{{ @ }}",
+                    "linkTextTemplate": "{{ @ }}",
+                    "linkTitleTemplate": "{{ @ }}",
+                    "linkOpenInNewTab": true,
+                    "allowSearch": false,
+                    "allowHTML": false,
+                    "highlightLinks": false,
+                    "useMonospaceFont": false,
+                    "preserveWhitespace": false,
+                    "fieldName": "balance_bn",
+                    "title": "Balance (US$ bn)",
+                    "visible": true,
+                    "order": 3,
+                    "type": "float",
+                    "displayAs": "number",
+                    "alignContent": "right",
+                    "numberFormat": "0,0.00"
+                  },
+                  {
+                    "booleanValues": [
+                      "false",
+                      "true"
+                    ],
+                    "imageUrlTemplate": "{{ @ }}",
+                    "imageTitleTemplate": "{{ @ }}",
+                    "imageWidth": "",
+                    "imageHeight": "",
+                    "linkUrlTemplate": "{{ @ }}",
+                    "linkTextTemplate": "{{ @ }}",
+                    "linkTitleTemplate": "{{ @ }}",
+                    "linkOpenInNewTab": true,
+                    "allowSearch": false,
+                    "allowHTML": false,
+                    "highlightLinks": false,
+                    "useMonospaceFont": false,
+                    "preserveWhitespace": false,
+                    "fieldName": "turnover_bn",
+                    "title": "Turnover (US$ bn)",
+                    "visible": true,
+                    "order": 4,
+                    "type": "float",
+                    "displayAs": "number",
+                    "alignContent": "right",
+                    "numberFormat": "0,0.00"
+                  },
+                  {
+                    "booleanValues": [
+                      "false",
+                      "true"
+                    ],
+                    "imageUrlTemplate": "{{ @ }}",
+                    "imageTitleTemplate": "{{ @ }}",
+                    "imageWidth": "",
+                    "imageHeight": "",
+                    "linkUrlTemplate": "{{ @ }}",
+                    "linkTextTemplate": "{{ @ }}",
+                    "linkTitleTemplate": "{{ @ }}",
+                    "linkOpenInNewTab": true,
+                    "allowSearch": false,
+                    "allowHTML": false,
+                    "highlightLinks": false,
+                    "useMonospaceFont": false,
+                    "preserveWhitespace": false,
+                    "fieldName": "position",
+                    "title": "Position",
+                    "visible": true,
+                    "order": 5,
+                    "type": "string",
+                    "displayAs": "string",
+                    "alignContent": "left"
+                  }
+                ]
+              }
+            }
+          },
+          "position": {
+            "x": 5,
+            "y": 21,
+            "width": 7,
+            "height": 9
+          }
+        },
+        {
+          "widget": {
+            "name": "pa_note",
+            "multilineTextboxSpec": {
+              "lines": [
+                "> **Why partner totals don't add up to the headline.** Customs publishes a country breakdown that covers most but not all trade. The gap is carried as an *Other / Unallocated* row, which the rankings above exclude. Summed across all countries the breakdown runs about 3-4% above the national total, so use the Overview page for headline figures and this page for relative standings.\n"
+              ]
+            }
+          },
+          "position": {
+            "x": 0,
+            "y": 30,
+            "width": 12,
+            "height": 3
+          }
+        }
+      ]
+    },
+    {
+      "name": "provinces",
+      "displayName": "Provinces",
+      "layout": [
+        {
+          "widget": {
+            "name": "pv_title",
+            "multilineTextboxSpec": {
+              "lines": [
+                "## Provinces\n",
+                "Trade by province of the exporting or importing business. Values only - province reports carry no product or quantity detail.\n"
+              ]
+            }
+          },
+          "position": {
+            "x": 0,
+            "y": 0,
+            "width": 12,
+            "height": 2
+          }
+        },
+        {
+          "widget": {
+            "name": "pv_f_date",
+            "queries": [
+              {
+                "name": "pv_f_date_q0",
+                "query": {
+                  "datasetName": "ds_provinces",
+                  "fields": [
+                    {
+                      "name": "report_date",
+                      "expression": "`report_date`"
+                    },
+                    {
+                      "name": "report_date_associativity",
+                      "expression": "COUNT_IF(`associative_filter_predicate_group`)"
+                    }
+                  ],
+                  "disaggregated": false
+                }
+              }
+            ],
+            "spec": {
+              "version": 2,
+              "widgetType": "filter-date-range-picker",
+              "frame": {
+                "showTitle": true,
+                "title": "Period"
+              },
+              "encodings": {
+                "fields": [
+                  {
+                    "fieldName": "report_date",
+                    "queryName": "pv_f_date_q0"
+                  }
+                ]
+              }
+            }
+          },
+          "position": {
+            "x": 0,
+            "y": 2,
+            "width": 4,
+            "height": 2
+          }
+        },
+        {
+          "widget": {
+            "name": "pv_f_flow",
+            "queries": [
+              {
+                "name": "pv_f_flow_q0",
+                "query": {
+                  "datasetName": "ds_provinces",
+                  "fields": [
+                    {
+                      "name": "flow",
+                      "expression": "`flow`"
+                    },
+                    {
+                      "name": "flow_associativity",
+                      "expression": "COUNT_IF(`associative_filter_predicate_group`)"
+                    }
+                  ],
+                  "disaggregated": false
+                }
+              }
+            ],
+            "spec": {
+              "version": 2,
+              "widgetType": "filter-single-select",
+              "frame": {
+                "showTitle": true,
+                "title": "Trade flow"
+              },
+              "encodings": {
+                "fields": [
+                  {
+                    "fieldName": "flow",
+                    "queryName": "pv_f_flow_q0"
+                  }
+                ]
+              }
+            }
+          },
+          "position": {
+            "x": 4,
+            "y": 2,
+            "width": 4,
+            "height": 2
+          }
+        },
+        {
+          "widget": {
+            "name": "pv_f_prov",
+            "queries": [
+              {
+                "name": "pv_f_prov_q0",
+                "query": {
+                  "datasetName": "ds_provinces",
+                  "fields": [
+                    {
+                      "name": "province",
+                      "expression": "`province`"
+                    },
+                    {
+                      "name": "province_associativity",
+                      "expression": "COUNT_IF(`associative_filter_predicate_group`)"
+                    }
+                  ],
+                  "disaggregated": false
+                }
+              }
+            ],
+            "spec": {
+              "version": 2,
+              "widgetType": "filter-multi-select",
+              "frame": {
+                "showTitle": true,
+                "title": "Province"
+              },
+              "encodings": {
+                "fields": [
+                  {
+                    "fieldName": "province",
+                    "queryName": "pv_f_prov_q0"
+                  }
+                ]
+              }
+            }
+          },
+          "position": {
+            "x": 8,
+            "y": 2,
+            "width": 4,
+            "height": 2
+          }
+        },
+        {
+          "widget": {
+            "name": "pv_top",
+            "queries": [
+              {
+                "name": "main_query",
+                "query": {
+                  "datasetName": "ds_provinces",
+                  "fields": [
+                    {
+                      "name": "province",
+                      "expression": "`province`"
+                    },
+                    {
+                      "name": "flow",
+                      "expression": "`flow`"
+                    },
+                    {
+                      "name": "sum(value_bn)",
+                      "expression": "SUM(`value_bn`)"
+                    }
+                  ],
+                  "disaggregated": false
+                }
+              }
+            ],
+            "spec": {
+              "version": 3,
+              "widgetType": "bar",
+              "frame": {
+                "showTitle": true,
+                "title": "Provinces ranked · selected period"
+              },
+              "encodings": {
+                "y": {
+                  "fieldName": "province",
+                  "scale": {
+                    "type": "categorical",
+                    "sort": {
+                      "by": "x-reversed"
+                    }
+                  },
+                  "axis": {
+                    "title": ""
+                  }
+                },
+                "x": {
+                  "fieldName": "sum(value_bn)",
+                  "scale": {
+                    "type": "quantitative"
+                  },
+                  "axis": {
+                    "title": "US$ billion"
+                  }
+                },
+                "color": {
+                  "fieldName": "flow",
+                  "scale": {
+                    "type": "categorical",
+                    "mappings": [
+                      {
+                        "value": "Export",
+                        "color": "#00A972"
+                      },
+                      {
+                        "value": "Import",
+                        "color": "#FF8C00"
+                      }
+                    ]
+                  },
+                  "legend": {
+                    "title": "Flow"
+                  }
+                }
+              },
+              "data": {
+                "queryName": "main_query"
+              }
+            }
+          },
+          "position": {
+            "x": 0,
+            "y": 4,
+            "width": 12,
+            "height": 10
+          }
+        },
+        {
+          "widget": {
+            "name": "pv_trend",
+            "queries": [
+              {
+                "name": "main_query",
+                "query": {
+                  "datasetName": "ds_provinces",
+                  "fields": [
+                    {
+                      "name": "report_date",
+                      "expression": "`report_date`"
+                    },
+                    {
+                      "name": "province",
+                      "expression": "`province`"
+                    },
+                    {
+                      "name": "sum(value_bn)",
+                      "expression": "SUM(`value_bn`)"
+                    }
+                  ],
+                  "disaggregated": false,
+                  "filters": [
+                    {
+                      "expression": "`rank_overall` <= 8"
+                    }
+                  ]
+                }
+              }
+            ],
+            "spec": {
+              "version": 3,
+              "widgetType": "line",
+              "frame": {
+                "showTitle": true,
+                "title": "How the top 8 provinces have moved"
+              },
+              "encodings": {
+                "x": {
+                  "fieldName": "report_date",
+                  "scale": {
+                    "type": "temporal"
+                  },
+                  "axis": {
+                    "title": "Month"
+                  }
+                },
+                "y": {
+                  "fieldName": "sum(value_bn)",
+                  "scale": {
+                    "type": "quantitative"
+                  },
+                  "axis": {
+                    "title": "US$ billion"
+                  }
+                },
+                "color": {
+                  "fieldName": "province",
+                  "scale": {
+                    "type": "categorical"
+                  },
+                  "axis": {
+                    "title": ""
+                  }
+                }
+              },
+              "data": {
+                "queryName": "main_query"
+              }
+            }
+          },
+          "position": {
+            "x": 0,
+            "y": 14,
+            "width": 12,
+            "height": 8
+          }
+        },
+        {
+          "widget": {
+            "name": "pv_table",
+            "queries": [
+              {
+                "name": "main_query",
+                "query": {
+                  "datasetName": "ds_province_balance",
+                  "fields": [
+                    {
+                      "name": "province",
+                      "expression": "`province`"
+                    },
+                    {
+                      "name": "exports_bn",
+                      "expression": "`exports_bn`"
+                    },
+                    {
+                      "name": "imports_bn",
+                      "expression": "`imports_bn`"
+                    },
+                    {
+                      "name": "balance_bn",
+                      "expression": "`balance_bn`"
+                    },
+                    {
+                      "name": "export_share_pct",
+                      "expression": "`export_share_pct`"
+                    }
+                  ],
+                  "disaggregated": true,
+                  "orders": [
+                    {
+                      "direction": "DESC",
+                      "expression": "`exports_bn`",
+                      "name": "exports_bn"
+                    }
+                  ]
+                }
+              }
+            ],
+            "spec": {
+              "version": 1,
+              "widgetType": "table",
+              "frame": {
+                "showTitle": true,
+                "title": "Province league table · last 12 months"
+              },
+              "encodings": {
+                "columns": [
+                  {
+                    "booleanValues": [
+                      "false",
+                      "true"
+                    ],
+                    "imageUrlTemplate": "{{ @ }}",
+                    "imageTitleTemplate": "{{ @ }}",
+                    "imageWidth": "",
+                    "imageHeight": "",
+                    "linkUrlTemplate": "{{ @ }}",
+                    "linkTextTemplate": "{{ @ }}",
+                    "linkTitleTemplate": "{{ @ }}",
+                    "linkOpenInNewTab": true,
+                    "allowSearch": false,
+                    "allowHTML": false,
+                    "highlightLinks": false,
+                    "useMonospaceFont": false,
+                    "preserveWhitespace": false,
+                    "fieldName": "province",
+                    "title": "Province",
+                    "visible": true,
+                    "order": 0,
+                    "type": "string",
+                    "displayAs": "string",
+                    "alignContent": "left"
+                  },
+                  {
+                    "booleanValues": [
+                      "false",
+                      "true"
+                    ],
+                    "imageUrlTemplate": "{{ @ }}",
+                    "imageTitleTemplate": "{{ @ }}",
+                    "imageWidth": "",
+                    "imageHeight": "",
+                    "linkUrlTemplate": "{{ @ }}",
+                    "linkTextTemplate": "{{ @ }}",
+                    "linkTitleTemplate": "{{ @ }}",
+                    "linkOpenInNewTab": true,
+                    "allowSearch": false,
+                    "allowHTML": false,
+                    "highlightLinks": false,
+                    "useMonospaceFont": false,
+                    "preserveWhitespace": false,
+                    "fieldName": "exports_bn",
+                    "title": "Exports (US$ bn)",
+                    "visible": true,
+                    "order": 1,
+                    "type": "float",
+                    "displayAs": "number",
+                    "alignContent": "right",
+                    "numberFormat": "0,0.00"
+                  },
+                  {
+                    "booleanValues": [
+                      "false",
+                      "true"
+                    ],
+                    "imageUrlTemplate": "{{ @ }}",
+                    "imageTitleTemplate": "{{ @ }}",
+                    "imageWidth": "",
+                    "imageHeight": "",
+                    "linkUrlTemplate": "{{ @ }}",
+                    "linkTextTemplate": "{{ @ }}",
+                    "linkTitleTemplate": "{{ @ }}",
+                    "linkOpenInNewTab": true,
+                    "allowSearch": false,
+                    "allowHTML": false,
+                    "highlightLinks": false,
+                    "useMonospaceFont": false,
+                    "preserveWhitespace": false,
+                    "fieldName": "imports_bn",
+                    "title": "Imports (US$ bn)",
+                    "visible": true,
+                    "order": 2,
+                    "type": "float",
+                    "displayAs": "number",
+                    "alignContent": "right",
+                    "numberFormat": "0,0.00"
+                  },
+                  {
+                    "booleanValues": [
+                      "false",
+                      "true"
+                    ],
+                    "imageUrlTemplate": "{{ @ }}",
+                    "imageTitleTemplate": "{{ @ }}",
+                    "imageWidth": "",
+                    "imageHeight": "",
+                    "linkUrlTemplate": "{{ @ }}",
+                    "linkTextTemplate": "{{ @ }}",
+                    "linkTitleTemplate": "{{ @ }}",
+                    "linkOpenInNewTab": true,
+                    "allowSearch": false,
+                    "allowHTML": false,
+                    "highlightLinks": false,
+                    "useMonospaceFont": false,
+                    "preserveWhitespace": false,
+                    "fieldName": "balance_bn",
+                    "title": "Balance (US$ bn)",
+                    "visible": true,
+                    "order": 3,
+                    "type": "float",
+                    "displayAs": "number",
+                    "alignContent": "right",
+                    "numberFormat": "0,0.00"
+                  },
+                  {
+                    "booleanValues": [
+                      "false",
+                      "true"
+                    ],
+                    "imageUrlTemplate": "{{ @ }}",
+                    "imageTitleTemplate": "{{ @ }}",
+                    "imageWidth": "",
+                    "imageHeight": "",
+                    "linkUrlTemplate": "{{ @ }}",
+                    "linkTextTemplate": "{{ @ }}",
+                    "linkTitleTemplate": "{{ @ }}",
+                    "linkOpenInNewTab": true,
+                    "allowSearch": false,
+                    "allowHTML": false,
+                    "highlightLinks": false,
+                    "useMonospaceFont": false,
+                    "preserveWhitespace": false,
+                    "fieldName": "export_share_pct",
+                    "title": "Share of national exports %",
+                    "visible": true,
+                    "order": 4,
+                    "type": "float",
+                    "displayAs": "number",
+                    "alignContent": "right",
+                    "numberFormat": "0,0.00"
+                  }
+                ]
+              }
+            }
+          },
+          "position": {
+            "x": 0,
+            "y": 22,
+            "width": 12,
+            "height": 9
+          }
+        },
+        {
+          "widget": {
+            "name": "pv_note",
+            "multilineTextboxSpec": {
+              "lines": [
+                "> **The 2025 reorganisation.** Resolution 202/2025/QH15 merged Vietnam's 63 provinces and cities into 34 with effect from 1 July 2025. Every figure here is expressed in the 34 current units, including months before the merger, so the series stays comparable across the break. Ho Chi Minh City, for example, now includes the former Binh Duong and Ba Ria-Vung Tau.\n"
+              ]
+            }
+          },
+          "position": {
+            "x": 0,
+            "y": 31,
+            "width": 12,
+            "height": 3
+          }
+        }
+      ]
+    },
+    {
+      "name": "transport",
+      "displayName": "Transport modes",
+      "layout": [
+        {
+          "widget": {
+            "name": "tr_title",
+            "multilineTextboxSpec": {
+              "lines": [
+                "## Transport modes\n",
+                "How goods physically move. This source is **quarterly**, not monthly, and Customs has published nothing for 2026 yet.\n"
+              ]
+            }
+          },
+          "position": {
+            "x": 0,
+            "y": 0,
+            "width": 12,
+            "height": 2
+          }
+        },
+        {
+          "widget": {
+            "name": "tr_f_flow",
+            "queries": [
+              {
+                "name": "tr_f_flow_q0",
+                "query": {
+                  "datasetName": "ds_transport_share",
+                  "fields": [
+                    {
+                      "name": "flow",
+                      "expression": "`flow`"
+                    },
+                    {
+                      "name": "flow_associativity",
+                      "expression": "COUNT_IF(`associative_filter_predicate_group`)"
+                    }
+                  ],
+                  "disaggregated": false
+                }
+              },
+              {
+                "name": "tr_f_flow_q1",
+                "query": {
+                  "datasetName": "ds_transport",
+                  "fields": [
+                    {
+                      "name": "flow",
+                      "expression": "`flow`"
+                    },
+                    {
+                      "name": "flow_associativity",
+                      "expression": "COUNT_IF(`associative_filter_predicate_group`)"
+                    }
+                  ],
+                  "disaggregated": false
+                }
+              }
+            ],
+            "spec": {
+              "version": 2,
+              "widgetType": "filter-single-select",
+              "frame": {
+                "showTitle": true,
+                "title": "Trade flow"
+              },
+              "encodings": {
+                "fields": [
+                  {
+                    "fieldName": "flow",
+                    "queryName": "tr_f_flow_q0"
+                  },
+                  {
+                    "fieldName": "flow",
+                    "queryName": "tr_f_flow_q1"
+                  }
+                ]
+              }
+            }
+          },
+          "position": {
+            "x": 0,
+            "y": 2,
+            "width": 4,
+            "height": 2
+          }
+        },
+        {
+          "widget": {
+            "name": "tr_f_mode",
+            "queries": [
+              {
+                "name": "tr_f_mode_q0",
+                "query": {
+                  "datasetName": "ds_transport_share",
+                  "fields": [
+                    {
+                      "name": "mode",
+                      "expression": "`mode`"
+                    },
+                    {
+                      "name": "mode_associativity",
+                      "expression": "COUNT_IF(`associative_filter_predicate_group`)"
+                    }
+                  ],
+                  "disaggregated": false
+                }
+              },
+              {
+                "name": "tr_f_mode_q1",
+                "query": {
+                  "datasetName": "ds_transport",
+                  "fields": [
+                    {
+                      "name": "mode",
+                      "expression": "`mode`"
+                    },
+                    {
+                      "name": "mode_associativity",
+                      "expression": "COUNT_IF(`associative_filter_predicate_group`)"
+                    }
+                  ],
+                  "disaggregated": false
+                }
+              }
+            ],
+            "spec": {
+              "version": 2,
+              "widgetType": "filter-multi-select",
+              "frame": {
+                "showTitle": true,
+                "title": "Mode"
+              },
+              "encodings": {
+                "fields": [
+                  {
+                    "fieldName": "mode",
+                    "queryName": "tr_f_mode_q0"
+                  },
+                  {
+                    "fieldName": "mode",
+                    "queryName": "tr_f_mode_q1"
+                  }
+                ]
+              }
+            }
+          },
+          "position": {
+            "x": 4,
+            "y": 2,
+            "width": 4,
+            "height": 2
+          }
+        },
+        {
+          "widget": {
+            "name": "tr_f_year",
+            "queries": [
+              {
+                "name": "tr_f_year_q0",
+                "query": {
+                  "datasetName": "ds_transport_share",
+                  "fields": [
+                    {
+                      "name": "report_year",
+                      "expression": "`report_year`"
+                    },
+                    {
+                      "name": "report_year_associativity",
+                      "expression": "COUNT_IF(`associative_filter_predicate_group`)"
+                    }
+                  ],
+                  "disaggregated": false
+                }
+              },
+              {
+                "name": "tr_f_year_q1",
+                "query": {
+                  "datasetName": "ds_transport",
+                  "fields": [
+                    {
+                      "name": "report_year",
+                      "expression": "`report_year`"
+                    },
+                    {
+                      "name": "report_year_associativity",
+                      "expression": "COUNT_IF(`associative_filter_predicate_group`)"
+                    }
+                  ],
+                  "disaggregated": false
+                }
+              }
+            ],
+            "spec": {
+              "version": 2,
+              "widgetType": "filter-multi-select",
+              "frame": {
+                "showTitle": true,
+                "title": "Year"
+              },
+              "encodings": {
+                "fields": [
+                  {
+                    "fieldName": "report_year",
+                    "queryName": "tr_f_year_q0"
+                  },
+                  {
+                    "fieldName": "report_year",
+                    "queryName": "tr_f_year_q1"
+                  }
+                ]
+              }
+            }
+          },
+          "position": {
+            "x": 8,
+            "y": 2,
+            "width": 4,
+            "height": 2
+          }
+        },
+        {
+          "widget": {
+            "name": "tr_share",
+            "queries": [
+              {
+                "name": "main_query",
+                "query": {
+                  "datasetName": "ds_transport_share",
+                  "fields": [
+                    {
+                      "name": "quarter_date",
+                      "expression": "`quarter_date`"
+                    },
+                    {
+                      "name": "mode",
+                      "expression": "`mode`"
+                    },
+                    {
+                      "name": "sum(value_bn)",
+                      "expression": "SUM(`value_bn`)"
+                    }
+                  ],
+                  "disaggregated": false
+                }
+              }
+            ],
+            "spec": {
+              "version": 3,
+              "widgetType": "area",
+              "frame": {
+                "showTitle": true,
+                "title": "Trade value by transport mode, by quarter"
+              },
+              "encodings": {
+                "x": {
+                  "fieldName": "quarter_date",
+                  "scale": {
+                    "type": "temporal"
+                  },
+                  "axis": {
+                    "title": "Quarter"
+                  }
+                },
+                "y": {
+                  "fieldName": "sum(value_bn)",
+                  "scale": {
+                    "type": "quantitative"
+                  },
+                  "axis": {
+                    "title": "US$ billion"
+                  }
+                },
+                "color": {
+                  "fieldName": "mode",
+                  "scale": {
+                    "type": "categorical"
+                  },
+                  "axis": {
+                    "title": ""
+                  }
+                }
+              },
+              "data": {
+                "queryName": "main_query"
+              }
+            }
+          },
+          "position": {
+            "x": 0,
+            "y": 4,
+            "width": 12,
+            "height": 8
+          }
+        },
+        {
+          "widget": {
+            "name": "tr_mix",
+            "queries": [
+              {
+                "name": "main_query",
+                "query": {
+                  "datasetName": "ds_transport_share",
+                  "fields": [
+                    {
+                      "name": "mode",
+                      "expression": "`mode`"
+                    },
+                    {
+                      "name": "flow",
+                      "expression": "`flow`"
+                    },
+                    {
+                      "name": "sum(value_bn)",
+                      "expression": "SUM(`value_bn`)"
+                    }
+                  ],
+                  "disaggregated": false
+                }
+              }
+            ],
+            "spec": {
+              "version": 3,
+              "widgetType": "bar",
+              "frame": {
+                "showTitle": true,
+                "title": "Total carried by each mode"
+              },
+              "encodings": {
+                "x": {
+                  "fieldName": "mode",
+                  "scale": {
+                    "type": "categorical"
+                  },
+                  "axis": {
+                    "title": "Mode"
+                  }
+                },
+                "y": {
+                  "fieldName": "sum(value_bn)",
+                  "scale": {
+                    "type": "quantitative"
+                  },
+                  "axis": {
+                    "title": "US$ billion"
+                  }
+                },
+                "color": {
+                  "fieldName": "flow",
+                  "scale": {
+                    "type": "categorical",
+                    "mappings": [
+                      {
+                        "value": "Export",
+                        "color": "#00A972"
+                      },
+                      {
+                        "value": "Import",
+                        "color": "#FF8C00"
+                      }
+                    ]
+                  },
+                  "legend": {
+                    "title": "Flow"
+                  }
+                }
+              },
+              "data": {
+                "queryName": "main_query"
+              }
+            }
+          },
+          "position": {
+            "x": 0,
+            "y": 12,
+            "width": 5,
+            "height": 8
+          }
+        },
+        {
+          "widget": {
+            "name": "tr_cat",
+            "queries": [
+              {
+                "name": "main_query",
+                "query": {
+                  "datasetName": "ds_transport",
+                  "fields": [
+                    {
+                      "name": "category",
+                      "expression": "`category`"
+                    },
+                    {
+                      "name": "mode",
+                      "expression": "`mode`"
+                    },
+                    {
+                      "name": "sum(value_bn)",
+                      "expression": "SUM(`value_bn`)"
+                    }
+                  ],
+                  "disaggregated": false,
+                  "filters": [
+                    {
+                      "expression": "`rank_overall` <= 12"
+                    }
+                  ]
+                }
+              }
+            ],
+            "spec": {
+              "version": 3,
+              "widgetType": "bar",
+              "frame": {
+                "showTitle": true,
+                "title": "Which mode carries which goods · top 12 categories"
+              },
+              "encodings": {
+                "y": {
+                  "fieldName": "category",
+                  "scale": {
+                    "type": "categorical",
+                    "sort": {
+                      "by": "x-reversed"
+                    }
+                  },
+                  "axis": {
+                    "title": ""
+                  }
+                },
+                "x": {
+                  "fieldName": "sum(value_bn)",
+                  "scale": {
+                    "type": "quantitative"
+                  },
+                  "axis": {
+                    "title": "US$ billion"
+                  }
+                },
+                "color": {
+                  "fieldName": "mode",
+                  "scale": {
+                    "type": "categorical"
+                  },
+                  "axis": {
+                    "title": ""
+                  }
+                }
+              },
+              "data": {
+                "queryName": "main_query"
+              }
+            }
+          },
+          "position": {
+            "x": 5,
+            "y": 12,
+            "width": 7,
+            "height": 8
+          }
+        }
+      ]
+    },
+    {
+      "name": "fdi",
+      "displayName": "FDI vs domestic",
+      "layout": [
+        {
+          "widget": {
+            "name": "fd_title",
+            "multilineTextboxSpec": {
+              "lines": [
+                "## Foreign-invested vs domestic enterprises\n",
+                "Customs reports the share of trade handled by foreign-invested (FDI) enterprises. The remainder is domestic.\n"
+              ]
+            }
+          },
+          "position": {
+            "x": 0,
+            "y": 0,
+            "width": 12,
+            "height": 2
+          }
+        },
+        {
+          "widget": {
+            "name": "fd_f_date",
+            "queries": [
+              {
+                "name": "fd_f_date_q0",
+                "query": {
+                  "datasetName": "ds_fdi",
+                  "fields": [
+                    {
+                      "name": "report_date",
+                      "expression": "`report_date`"
+                    },
+                    {
+                      "name": "report_date_associativity",
+                      "expression": "COUNT_IF(`associative_filter_predicate_group`)"
+                    }
+                  ],
+                  "disaggregated": false
+                }
+              }
+            ],
+            "spec": {
+              "version": 2,
+              "widgetType": "filter-date-range-picker",
+              "frame": {
+                "showTitle": true,
+                "title": "Period"
+              },
+              "encodings": {
+                "fields": [
+                  {
+                    "fieldName": "report_date",
+                    "queryName": "fd_f_date_q0"
+                  }
+                ]
+              }
+            }
+          },
+          "position": {
+            "x": 0,
+            "y": 2,
+            "width": 6,
+            "height": 2
+          }
+        },
+        {
+          "widget": {
+            "name": "fd_f_flow",
+            "queries": [
+              {
+                "name": "fd_f_flow_q0",
+                "query": {
+                  "datasetName": "ds_fdi",
+                  "fields": [
+                    {
+                      "name": "flow",
+                      "expression": "`flow`"
+                    },
+                    {
+                      "name": "flow_associativity",
+                      "expression": "COUNT_IF(`associative_filter_predicate_group`)"
+                    }
+                  ],
+                  "disaggregated": false
+                }
+              }
+            ],
+            "spec": {
+              "version": 2,
+              "widgetType": "filter-single-select",
+              "frame": {
+                "showTitle": true,
+                "title": "Trade flow"
+              },
+              "encodings": {
+                "fields": [
+                  {
+                    "fieldName": "flow",
+                    "queryName": "fd_f_flow_q0"
+                  }
+                ]
+              }
+            }
+          },
+          "position": {
+            "x": 6,
+            "y": 2,
+            "width": 6,
+            "height": 2
+          }
+        },
+        {
+          "widget": {
+            "name": "fd_share",
+            "queries": [
+              {
+                "name": "main_query",
+                "query": {
+                  "datasetName": "ds_fdi",
+                  "fields": [
+                    {
+                      "name": "report_date",
+                      "expression": "`report_date`"
+                    },
+                    {
+                      "name": "flow",
+                      "expression": "`flow`"
+                    },
+                    {
+                      "name": "sum(fdi_share_pct)",
+                      "expression": "SUM(`fdi_share_pct`)"
+                    }
+                  ],
+                  "disaggregated": false
+                }
+              }
+            ],
+            "spec": {
+              "version": 3,
+              "widgetType": "line",
+              "frame": {
+                "showTitle": true,
+                "title": "FDI share of trade",
+                "showDescription": true,
+                "description": "Share of the national total handled by foreign-invested enterprises."
+              },
+              "encodings": {
+                "x": {
+                  "fieldName": "report_date",
+                  "scale": {
+                    "type": "temporal"
+                  },
+                  "axis": {
+                    "title": "Month"
+                  }
+                },
+                "y": {
+                  "fieldName": "sum(fdi_share_pct)",
+                  "scale": {
+                    "type": "quantitative"
+                  },
+                  "axis": {
+                    "title": "% of national total"
+                  }
+                },
+                "color": {
+                  "fieldName": "flow",
+                  "scale": {
+                    "type": "categorical",
+                    "mappings": [
+                      {
+                        "value": "Export",
+                        "color": "#00A972"
+                      },
+                      {
+                        "value": "Import",
+                        "color": "#FF8C00"
+                      }
+                    ]
+                  },
+                  "legend": {
+                    "title": "Flow"
+                  }
+                }
+              },
+              "data": {
+                "queryName": "main_query"
+              }
+            }
+          },
+          "position": {
+            "x": 0,
+            "y": 4,
+            "width": 12,
+            "height": 7
+          }
+        },
+        {
+          "widget": {
+            "name": "fd_split",
+            "queries": [
+              {
+                "name": "main_query",
+                "query": {
+                  "datasetName": "ds_fdi",
+                  "fields": [
+                    {
+                      "name": "report_date",
+                      "expression": "`report_date`"
+                    },
+                    {
+                      "name": "sum(fdi_bn)",
+                      "expression": "SUM(`fdi_bn`)"
+                    },
+                    {
+                      "name": "sum(domestic_bn)",
+                      "expression": "SUM(`domestic_bn`)"
+                    }
+                  ],
+                  "disaggregated": false
+                }
+              }
+            ],
+            "spec": {
+              "version": 3,
+              "widgetType": "area",
+              "frame": {
+                "showTitle": true,
+                "title": "Foreign-invested vs domestic trade value",
+                "showDescription": true,
+                "description": "Pick a single trade flow above, or the two flows are stacked together."
+              },
+              "encodings": {
+                "x": {
+                  "fieldName": "report_date",
+                  "scale": {
+                    "type": "temporal"
+                  },
+                  "axis": {
+                    "title": "Month"
+                  }
+                },
+                "y": {
+                  "fields": [
+                    {
+                      "fieldName": "sum(fdi_bn)",
+                      "displayName": "Foreign-invested"
+                    },
+                    {
+                      "fieldName": "sum(domestic_bn)",
+                      "displayName": "Domestic"
+                    }
+                  ],
+                  "scale": {
+                    "type": "quantitative"
+                  },
+                  "axis": {
+                    "title": "US$ billion"
+                  }
+                }
+              },
+              "data": {
+                "queryName": "main_query"
+              }
+            }
+          },
+          "position": {
+            "x": 0,
+            "y": 11,
+            "width": 6,
+            "height": 7
+          }
+        },
+        {
+          "widget": {
+            "name": "fd_cat",
+            "queries": [
+              {
+                "name": "main_query",
+                "query": {
+                  "datasetName": "ds_fdi_products",
+                  "fields": [
+                    {
+                      "name": "category",
+                      "expression": "`category`"
+                    },
+                    {
+                      "name": "flow",
+                      "expression": "`flow`"
+                    },
+                    {
+                      "name": "sum(value_bn)",
+                      "expression": "SUM(`value_bn`)"
+                    }
+                  ],
+                  "disaggregated": false,
+                  "filters": [
+                    {
+                      "expression": "`rank_overall` <= 12"
+                    }
+                  ]
+                }
+              }
+            ],
+            "spec": {
+              "version": 3,
+              "widgetType": "bar",
+              "frame": {
+                "showTitle": true,
+                "title": "Where FDI concentrates · top 12, last 12 months"
+              },
+              "encodings": {
+                "y": {
+                  "fieldName": "category",
+                  "scale": {
+                    "type": "categorical",
+                    "sort": {
+                      "by": "x-reversed"
+                    }
+                  },
+                  "axis": {
+                    "title": ""
+                  }
+                },
+                "x": {
+                  "fieldName": "sum(value_bn)",
+                  "scale": {
+                    "type": "quantitative"
+                  },
+                  "axis": {
+                    "title": "US$ billion"
+                  }
+                },
+                "color": {
+                  "fieldName": "flow",
+                  "scale": {
+                    "type": "categorical",
+                    "mappings": [
+                      {
+                        "value": "Export",
+                        "color": "#00A972"
+                      },
+                      {
+                        "value": "Import",
+                        "color": "#FF8C00"
+                      }
+                    ]
+                  },
+                  "legend": {
+                    "title": "Flow"
+                  }
+                }
+              },
+              "data": {
+                "queryName": "main_query"
+              }
+            }
+          },
+          "position": {
+            "x": 6,
+            "y": 11,
+            "width": 6,
+            "height": 7
+          }
+        },
+        {
+          "widget": {
+            "name": "fd_note",
+            "multilineTextboxSpec": {
+              "lines": [
+                "> Customs does not break every commodity out by ownership. Categories it leaves out are counted as domestic here, so the FDI share is a floor rather than an exact figure.\n"
+              ]
+            }
+          },
+          "position": {
+            "x": 0,
+            "y": 18,
+            "width": 12,
+            "height": 2
+          }
+        }
+      ]
+    },
+    {
+      "name": "data_quality",
+      "displayName": "Data quality",
+      "layout": [
+        {
+          "widget": {
+            "name": "dq_title",
+            "multilineTextboxSpec": {
+              "lines": [
+                "## Data quality\n",
+                "Everything on this dashboard is extracted from PDF reports published by the General Department of Vietnam Customs. This page shows how complete that extraction is and where it is known to be imperfect.\n"
+              ]
+            }
+          },
+          "position": {
+            "x": 0,
+            "y": 0,
+            "width": 12,
+            "height": 3
+          }
+        },
+        {
+          "widget": {
+            "name": "dq_coverage",
+            "queries": [
+              {
+                "name": "main_query",
+                "query": {
+                  "datasetName": "ds_coverage",
+                  "fields": [
+                    {
+                      "name": "workstream",
+                      "expression": "`workstream`"
+                    },
+                    {
+                      "name": "expected_periods",
+                      "expression": "`expected_periods`"
+                    },
+                    {
+                      "name": "complete",
+                      "expression": "`complete`"
+                    },
+                    {
+                      "name": "incomplete",
+                      "expression": "`incomplete`"
+                    },
+                    {
+                      "name": "missing",
+                      "expression": "`missing`"
+                    },
+                    {
+                      "name": "never_published",
+                      "expression": "`never_published`"
+                    },
+                    {
+                      "name": "actionable_gaps",
+                      "expression": "`actionable_gaps`"
+                    },
+                    {
+                      "name": "first_period",
+                      "expression": "`first_period`"
+                    },
+                    {
+                      "name": "last_complete_period",
+                      "expression": "`last_complete_period`"
+                    }
+                  ],
+                  "disaggregated": true
+                }
+              }
+            ],
+            "spec": {
+              "version": 1,
+              "widgetType": "table",
+              "frame": {
+                "showTitle": true,
+                "title": "Coverage by source",
+                "showDescription": true,
+                "description": "'Actionable gaps' excludes periods Customs has not released yet and periods it never made retrievable."
+              },
+              "encodings": {
+                "columns": [
+                  {
+                    "booleanValues": [
+                      "false",
+                      "true"
+                    ],
+                    "imageUrlTemplate": "{{ @ }}",
+                    "imageTitleTemplate": "{{ @ }}",
+                    "imageWidth": "",
+                    "imageHeight": "",
+                    "linkUrlTemplate": "{{ @ }}",
+                    "linkTextTemplate": "{{ @ }}",
+                    "linkTitleTemplate": "{{ @ }}",
+                    "linkOpenInNewTab": true,
+                    "allowSearch": false,
+                    "allowHTML": false,
+                    "highlightLinks": false,
+                    "useMonospaceFont": false,
+                    "preserveWhitespace": false,
+                    "fieldName": "workstream",
+                    "title": "Source",
+                    "visible": true,
+                    "order": 0,
+                    "type": "string",
+                    "displayAs": "string",
+                    "alignContent": "left"
+                  },
+                  {
+                    "booleanValues": [
+                      "false",
+                      "true"
+                    ],
+                    "imageUrlTemplate": "{{ @ }}",
+                    "imageTitleTemplate": "{{ @ }}",
+                    "imageWidth": "",
+                    "imageHeight": "",
+                    "linkUrlTemplate": "{{ @ }}",
+                    "linkTextTemplate": "{{ @ }}",
+                    "linkTitleTemplate": "{{ @ }}",
+                    "linkOpenInNewTab": true,
+                    "allowSearch": false,
+                    "allowHTML": false,
+                    "highlightLinks": false,
+                    "useMonospaceFont": false,
+                    "preserveWhitespace": false,
+                    "fieldName": "expected_periods",
+                    "title": "Periods expected",
+                    "visible": true,
+                    "order": 1,
+                    "type": "float",
+                    "displayAs": "number",
+                    "alignContent": "right",
+                    "numberFormat": "0,0.00"
+                  },
+                  {
+                    "booleanValues": [
+                      "false",
+                      "true"
+                    ],
+                    "imageUrlTemplate": "{{ @ }}",
+                    "imageTitleTemplate": "{{ @ }}",
+                    "imageWidth": "",
+                    "imageHeight": "",
+                    "linkUrlTemplate": "{{ @ }}",
+                    "linkTextTemplate": "{{ @ }}",
+                    "linkTitleTemplate": "{{ @ }}",
+                    "linkOpenInNewTab": true,
+                    "allowSearch": false,
+                    "allowHTML": false,
+                    "highlightLinks": false,
+                    "useMonospaceFont": false,
+                    "preserveWhitespace": false,
+                    "fieldName": "complete",
+                    "title": "Complete",
+                    "visible": true,
+                    "order": 2,
+                    "type": "float",
+                    "displayAs": "number",
+                    "alignContent": "right",
+                    "numberFormat": "0,0.00"
+                  },
+                  {
+                    "booleanValues": [
+                      "false",
+                      "true"
+                    ],
+                    "imageUrlTemplate": "{{ @ }}",
+                    "imageTitleTemplate": "{{ @ }}",
+                    "imageWidth": "",
+                    "imageHeight": "",
+                    "linkUrlTemplate": "{{ @ }}",
+                    "linkTextTemplate": "{{ @ }}",
+                    "linkTitleTemplate": "{{ @ }}",
+                    "linkOpenInNewTab": true,
+                    "allowSearch": false,
+                    "allowHTML": false,
+                    "highlightLinks": false,
+                    "useMonospaceFont": false,
+                    "preserveWhitespace": false,
+                    "fieldName": "incomplete",
+                    "title": "Partial",
+                    "visible": true,
+                    "order": 3,
+                    "type": "float",
+                    "displayAs": "number",
+                    "alignContent": "right",
+                    "numberFormat": "0,0.00"
+                  },
+                  {
+                    "booleanValues": [
+                      "false",
+                      "true"
+                    ],
+                    "imageUrlTemplate": "{{ @ }}",
+                    "imageTitleTemplate": "{{ @ }}",
+                    "imageWidth": "",
+                    "imageHeight": "",
+                    "linkUrlTemplate": "{{ @ }}",
+                    "linkTextTemplate": "{{ @ }}",
+                    "linkTitleTemplate": "{{ @ }}",
+                    "linkOpenInNewTab": true,
+                    "allowSearch": false,
+                    "allowHTML": false,
+                    "highlightLinks": false,
+                    "useMonospaceFont": false,
+                    "preserveWhitespace": false,
+                    "fieldName": "missing",
+                    "title": "Missing",
+                    "visible": true,
+                    "order": 4,
+                    "type": "float",
+                    "displayAs": "number",
+                    "alignContent": "right",
+                    "numberFormat": "0,0.00"
+                  },
+                  {
+                    "booleanValues": [
+                      "false",
+                      "true"
+                    ],
+                    "imageUrlTemplate": "{{ @ }}",
+                    "imageTitleTemplate": "{{ @ }}",
+                    "imageWidth": "",
+                    "imageHeight": "",
+                    "linkUrlTemplate": "{{ @ }}",
+                    "linkTextTemplate": "{{ @ }}",
+                    "linkTitleTemplate": "{{ @ }}",
+                    "linkOpenInNewTab": true,
+                    "allowSearch": false,
+                    "allowHTML": false,
+                    "highlightLinks": false,
+                    "useMonospaceFont": false,
+                    "preserveWhitespace": false,
+                    "fieldName": "never_published",
+                    "title": "Never published",
+                    "visible": true,
+                    "order": 5,
+                    "type": "float",
+                    "displayAs": "number",
+                    "alignContent": "right",
+                    "numberFormat": "0,0.00"
+                  },
+                  {
+                    "booleanValues": [
+                      "false",
+                      "true"
+                    ],
+                    "imageUrlTemplate": "{{ @ }}",
+                    "imageTitleTemplate": "{{ @ }}",
+                    "imageWidth": "",
+                    "imageHeight": "",
+                    "linkUrlTemplate": "{{ @ }}",
+                    "linkTextTemplate": "{{ @ }}",
+                    "linkTitleTemplate": "{{ @ }}",
+                    "linkOpenInNewTab": true,
+                    "allowSearch": false,
+                    "allowHTML": false,
+                    "highlightLinks": false,
+                    "useMonospaceFont": false,
+                    "preserveWhitespace": false,
+                    "fieldName": "actionable_gaps",
+                    "title": "Actionable gaps",
+                    "visible": true,
+                    "order": 6,
+                    "type": "float",
+                    "displayAs": "number",
+                    "alignContent": "right",
+                    "numberFormat": "0,0.00"
+                  },
+                  {
+                    "booleanValues": [
+                      "false",
+                      "true"
+                    ],
+                    "imageUrlTemplate": "{{ @ }}",
+                    "imageTitleTemplate": "{{ @ }}",
+                    "imageWidth": "",
+                    "imageHeight": "",
+                    "linkUrlTemplate": "{{ @ }}",
+                    "linkTextTemplate": "{{ @ }}",
+                    "linkTitleTemplate": "{{ @ }}",
+                    "linkOpenInNewTab": true,
+                    "allowSearch": false,
+                    "allowHTML": false,
+                    "highlightLinks": false,
+                    "useMonospaceFont": false,
+                    "preserveWhitespace": false,
+                    "fieldName": "first_period",
+                    "title": "From",
+                    "visible": true,
+                    "order": 7,
+                    "type": "string",
+                    "displayAs": "string",
+                    "alignContent": "left"
+                  },
+                  {
+                    "booleanValues": [
+                      "false",
+                      "true"
+                    ],
+                    "imageUrlTemplate": "{{ @ }}",
+                    "imageTitleTemplate": "{{ @ }}",
+                    "imageWidth": "",
+                    "imageHeight": "",
+                    "linkUrlTemplate": "{{ @ }}",
+                    "linkTextTemplate": "{{ @ }}",
+                    "linkTitleTemplate": "{{ @ }}",
+                    "linkOpenInNewTab": true,
+                    "allowSearch": false,
+                    "allowHTML": false,
+                    "highlightLinks": false,
+                    "useMonospaceFont": false,
+                    "preserveWhitespace": false,
+                    "fieldName": "last_complete_period",
+                    "title": "Latest complete",
+                    "visible": true,
+                    "order": 8,
+                    "type": "string",
+                    "displayAs": "string",
+                    "alignContent": "left"
+                  }
+                ]
+              }
+            }
+          },
+          "position": {
+            "x": 0,
+            "y": 3,
+            "width": 12,
+            "height": 6
+          }
+        },
+        {
+          "widget": {
+            "name": "dq_recon",
+            "queries": [
+              {
+                "name": "main_query",
+                "query": {
+                  "datasetName": "ds_grain_reconciliation",
+                  "fields": [
+                    {
+                      "name": "report_date",
+                      "expression": "`report_date`"
+                    },
+                    {
+                      "name": "breakdown",
+                      "expression": "`breakdown`"
+                    },
+                    {
+                      "name": "sum(deviation_pct)",
+                      "expression": "SUM(`deviation_pct`)"
+                    }
+                  ],
+                  "disaggregated": false
+                }
+              }
+            ],
+            "spec": {
+              "version": 3,
+              "widgetType": "line",
+              "frame": {
+                "showTitle": true,
+                "title": "How closely each breakdown reconciles to the national total",
+                "showDescription": true,
+                "description": "Zero means the breakdown sums exactly to the official total. Provinces sit on zero; country and FDI run a few per cent high."
+              },
+              "encodings": {
+                "x": {
+                  "fieldName": "report_date",
+                  "scale": {
+                    "type": "temporal"
+                  },
+                  "axis": {
+                    "title": "Month"
+                  }
+                },
+                "y": {
+                  "fieldName": "sum(deviation_pct)",
+                  "scale": {
+                    "type": "quantitative"
+                  },
+                  "axis": {
+                    "title": "% difference from national total"
+                  }
+                },
+                "color": {
+                  "fieldName": "breakdown",
+                  "scale": {
+                    "type": "categorical"
+                  },
+                  "axis": {
+                    "title": ""
+                  }
+                }
+              },
+              "data": {
+                "queryName": "main_query"
+              }
+            }
+          },
+          "position": {
+            "x": 0,
+            "y": 9,
+            "width": 12,
+            "height": 7
+          }
+        },
+        {
+          "widget": {
+            "name": "dq_notes",
+            "multilineTextboxSpec": {
+              "lines": [
+                "### Known limitations\n",
+                "\n",
+                "**Country and FDI breakdowns run 3-4% above the national total.** Customs publishes a partial breakdown plus a residual, and where the named entries already exceed the category total the residual is floored at zero rather than going negative. Rankings and trends are sound; the sums are not. Take headline figures from the Overview page.\n",
+                "\n",
+                "**A handful of country names come from damaged scans.** Older PDFs were OCR'd poorly and a few country labels are mangled - mostly Taiwan, Portugal and Sweden. Rows the pipeline could not resolve confidently are flagged in `market_data.customs.dim_country_suspect_variants`.\n",
+                "\n",
+                "**October 2022 imports by country are missing permanently.** Customs published that one report only on an internal host that is unreachable from outside their network. The export side of that month is present.\n",
+                "\n",
+                "**Transport-mode data is quarterly and stops at 2025-Q4.** Customs has not released 2026 quarters. This is a publication schedule, not a pipeline failure.\n",
+                "\n",
+                "**Province figures use the 34 post-2025 units throughout,** including for months before the July 2025 merger, so that series stay comparable.\n",
+                "\n",
+                "The pipeline refreshes on the 15th of each month and fails loudly rather than publishing bad numbers.\n"
+              ]
+            }
+          },
+          "position": {
+            "x": 0,
+            "y": 16,
+            "width": 12,
+            "height": 12
+          }
+        }
+      ]
+    }
+  ]
+}
