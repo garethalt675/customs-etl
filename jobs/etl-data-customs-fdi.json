@@ -11,6 +11,11 @@
     }
   ],
   "format": "MULTI_TASK",
+  "git_source": {
+    "git_branch": "main",
+    "git_provider": "gitHub",
+    "git_url": "https://github.com/garethalt675/customs-etl"
+  },
   "max_concurrent_runs": 1,
   "name": "etl data customs (fdi)",
   "performance_target": "PERFORMANCE_OPTIMIZED",
@@ -23,8 +28,8 @@
       "email_notifications": {},
       "environment_key": "Default",
       "notebook_task": {
-        "notebook_path": "/Workspace/Users/tuckeyhue@gmail.com/Market Research/1. Data ETL/1. Customs/IMEX Goods by FDI Monthly Data/0_Update_FDI_URL_Table",
-        "source": "WORKSPACE"
+        "notebook_path": "notebooks/IMEX Goods by FDI Monthly Data/0_Update_FDI_URL_Table",
+        "source": "GIT"
       },
       "run_if": "ALL_SUCCESS",
       "task_key": "url_crawl",
@@ -41,8 +46,8 @@
       "email_notifications": {},
       "environment_key": "Default",
       "notebook_task": {
-        "notebook_path": "/Workspace/Users/tuckeyhue@gmail.com/Market Research/1. Data ETL/1. Customs/IMEX Goods by FDI Monthly Data/1_Download_FDI_Documents",
-        "source": "WORKSPACE"
+        "notebook_path": "notebooks/IMEX Goods by FDI Monthly Data/1_Download_FDI_Documents",
+        "source": "GIT"
       },
       "run_if": "ALL_SUCCESS",
       "task_key": "download_docs",
@@ -59,8 +64,8 @@
       "email_notifications": {},
       "environment_key": "Default",
       "notebook_task": {
-        "notebook_path": "/Workspace/Users/tuckeyhue@gmail.com/Market Research/1. Data ETL/1. Customs/IMEX Goods by FDI Monthly Data/2_Parse_FDI_Documents",
-        "source": "WORKSPACE"
+        "notebook_path": "notebooks/IMEX Goods by FDI Monthly Data/2_Parse_FDI_Documents",
+        "source": "GIT"
       },
       "run_if": "ALL_SUCCESS",
       "task_key": "parsed_docs",
@@ -77,8 +82,8 @@
       "email_notifications": {},
       "environment_key": "Default",
       "notebook_task": {
-        "notebook_path": "/Workspace/Users/tuckeyhue@gmail.com/Market Research/1. Data ETL/1. Customs/IMEX Goods by FDI Monthly Data/3_Extract_FDI_Statistics",
-        "source": "WORKSPACE"
+        "notebook_path": "notebooks/IMEX Goods by FDI Monthly Data/3_Extract_FDI_Statistics",
+        "source": "GIT"
       },
       "run_if": "ALL_SUCCESS",
       "task_key": "extract_data",

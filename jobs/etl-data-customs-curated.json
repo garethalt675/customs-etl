@@ -11,6 +11,11 @@
     }
   ],
   "format": "MULTI_TASK",
+  "git_source": {
+    "git_branch": "main",
+    "git_provider": "gitHub",
+    "git_url": "https://github.com/garethalt675/customs-etl"
+  },
   "max_concurrent_runs": 1,
   "name": "etl data customs (curated)",
   "performance_target": "PERFORMANCE_OPTIMIZED",
@@ -23,8 +28,8 @@
       "email_notifications": {},
       "environment_key": "Default",
       "notebook_task": {
-        "notebook_path": "/Workspace/Users/tuckeyhue@gmail.com/Market Research/1. Data ETL/1. Customs/4_Curated/03_build_dim_province",
-        "source": "WORKSPACE"
+        "notebook_path": "notebooks/4_Curated/03_build_dim_province",
+        "source": "GIT"
       },
       "run_if": "ALL_SUCCESS",
       "task_key": "dim_province",
@@ -41,8 +46,8 @@
       "email_notifications": {},
       "environment_key": "Default",
       "notebook_task": {
-        "notebook_path": "/Workspace/Users/tuckeyhue@gmail.com/Market Research/1. Data ETL/1. Customs/4_Curated/01_build_curated_trade_statistics",
-        "source": "WORKSPACE"
+        "notebook_path": "notebooks/4_Curated/01_build_curated_trade_statistics",
+        "source": "GIT"
       },
       "run_if": "ALL_SUCCESS",
       "task_key": "build_curated",
@@ -59,8 +64,8 @@
       "email_notifications": {},
       "environment_key": "Default",
       "notebook_task": {
-        "notebook_path": "/Workspace/Users/tuckeyhue@gmail.com/Market Research/1. Data ETL/1. Customs/4_Curated/05_translate_dimensions",
-        "source": "WORKSPACE"
+        "notebook_path": "notebooks/4_Curated/05_translate_dimensions",
+        "source": "GIT"
       },
       "run_if": "ALL_SUCCESS",
       "task_key": "translate_dims",
@@ -77,8 +82,8 @@
       "email_notifications": {},
       "environment_key": "Default",
       "notebook_task": {
-        "notebook_path": "/Workspace/Users/tuckeyhue@gmail.com/Market Research/1. Data ETL/1. Customs/4_Curated/01_build_curated_trade_statistics",
-        "source": "WORKSPACE"
+        "notebook_path": "notebooks/4_Curated/01_build_curated_trade_statistics",
+        "source": "GIT"
       },
       "run_if": "ALL_SUCCESS",
       "task_key": "refresh_curated",
@@ -95,8 +100,8 @@
       "email_notifications": {},
       "environment_key": "Default",
       "notebook_task": {
-        "notebook_path": "/Workspace/Users/tuckeyhue@gmail.com/Market Research/1. Data ETL/1. Customs/4_Curated/04_build_coverage_views",
-        "source": "WORKSPACE"
+        "notebook_path": "notebooks/4_Curated/04_build_coverage_views",
+        "source": "GIT"
       },
       "run_if": "ALL_SUCCESS",
       "task_key": "coverage_views",
@@ -113,8 +118,8 @@
       "email_notifications": {},
       "environment_key": "Default",
       "notebook_task": {
-        "notebook_path": "/Workspace/Users/tuckeyhue@gmail.com/Market Research/1. Data ETL/1. Customs/4_Curated/06_qa_checks",
-        "source": "WORKSPACE"
+        "notebook_path": "notebooks/4_Curated/06_qa_checks",
+        "source": "GIT"
       },
       "run_if": "ALL_SUCCESS",
       "task_key": "qa_checks",

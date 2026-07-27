@@ -65,7 +65,26 @@ Authentication uses the `DEFAULT` profile in `~/.databrickscfg`, or the
 `DATABRICKS_HOST` / `DATABRICKS_TOKEN` environment variables. **No credentials are
 stored in this repo** — see `.gitignore`.
 
-### Syncing with Databricks
+### Scheduled runs come from this repo
+
+Every job task uses `source: GIT` against `main` of this repository. Databricks
+checks the repo out fresh on each run, so **what is on `main` is what runs** —
+editing a notebook in the Databricks UI no longer changes a scheduled run.
+
+To ship a change: commit and push to `main`. That is the whole deployment.
+
+```bash
+python scripts/jobs_use_git.py --dry-run   # show which tasks would be repointed
+python scripts/jobs_use_git.py             # apply (idempotent)
+```
+
+Checkout of this private repo needs a GitHub credential in the workspace under
+**Settings → Linked accounts**. Without it every task fails at checkout.
+
+### Syncing with the workspace copy
+
+The workspace folder still holds a copy for interactive work. It is now a
+scratchpad, not the source of truth.
 
 ```bash
 python scripts/databricks_sync.py diff          # what differs
@@ -75,7 +94,9 @@ python scripts/databricks_sync.py push          # repo -> workspace
 python scripts/databricks_sync.py push --dry-run
 ```
 
-Typical loop on a new machine: `pull`, edit, commit, `push`.
+Loop when prototyping in the UI: edit in the workspace, `pull`, commit, push to
+`main`. Loop on a fresh machine: clone, edit locally, commit, push, then `push`
+to Databricks if you also want the interactive copy updated.
 
 Point at a different workspace folder with `CUSTOMS_WS_BASE`.
 
@@ -87,6 +108,17 @@ python scripts/export_jobs.py     # refresh jobs/*.json from the workspace
 
 `jobs/*.json` records each workflow DAG. They are exported for reference and
 disaster recovery; `databricks_sync.py` does not apply them.
+
+### Dashboard
+
+```bash
+python dashboards/build_dashboard.py            # regenerate the JSON
+python dashboards/build_dashboard.py --deploy   # regenerate and publish
+```
+
+`dashboards/queries.py` is the source of truth for every figure on the
+"Vietnam Import-Export Statistics" dashboard. Editing the dashboard in the
+Databricks UI works, but the next `--deploy` overwrites those edits.
 
 ---
 
@@ -117,9 +149,19 @@ real bug.
 - **Normalize Vietnamese text for joins.** Source PDFs are OCR'd and carry accent
   and case damage (`Đường`/`Dường`/`Dương`, `Đăk Lăk`/`Đắk Lắk`). Note that NFD does
   **not** decompose `Đ`/`đ` — replace it explicitly.
+- **`trade_flow` is stored lower case** (`export` / `import`). Filtering for
+  `'Export'` matches nothing and returns a silently empty result rather than an
+  error — this emptied every KPI on the first version of the dashboard.
+- **Take headline totals from the `total` grain only.** The country and FDI
+  breakdowns sum 3–4% above the national total, because Customs publishes a
+  partial breakdown plus a residual and that residual is floored at zero instead
+  of going negative. Rankings are sound; the sums are not.
 
 ## Status
 
-Workstreams are live and current with the source. Remaining work: coverage
-backfill and audit, curated-layer rebuild including the province grain, and
-scheduling. Transport-mode reports are **quarterly** — schedule accordingly.
+All five workstreams are live and current, the curated layer is built and QA
+gated, and the orchestrator runs unattended on the **15th of each month at 06:00
+Asia/Ho_Chi_Minh**, executing this repo's `main` branch.
+
+Transport-mode reports are **quarterly** and Customs has published nothing for
+2026 — a transport series ending at 2025-Q4 is expected, not a failure.
